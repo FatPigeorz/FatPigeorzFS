@@ -1,29 +1,48 @@
+pub mod fs;
+
 use fuser::{Filesystem};
-use clap::{Parser};
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use log::{LevelFilter};
 
 struct NullFS;
 
 impl Filesystem for NullFS {}
-
 #[derive(Parser, Debug)]
 #[command(name = "FatPigeorzFS")]
-#[command(author = "FatPigeorz <github/FatPigeorz/")]
-#[command(version = "1.0")]
-#[command(about = "A FileSystem base on Fuse", long_about = None)]
+#[command(author = "FatPigeorz <github.com/FatPigeorz>")]
+#[command(version = "0.1.0")]
+#[command(about = "A FileSystem based on Fuse and Rust", long_about = None)]
 struct CLI {
-    #[arg(long, short, value_name="IMAGE_PATH", default_value = "./fs.img")]
-    image_path: PathBuf,
+    // subcommands
+    #[command(subcommand)]
+    commands: Commands,
+}
 
-    #[arg(long, short, value_name="MOUNTPOINT", default_value = "./mnt/")]
-    mountpoint: PathBuf,
-    
-    #[arg(short, value_name="verbosity", default_value = "3")]
-    verbosity: u32,
-    
-    #[arg(short, long, default_value = "true")]
-    auto_unmount: bool
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Mkfs {
+        // the image path
+        #[arg(long, short, value_name="IMAGE_PATH", default_value = "./myDisk.img")]
+        path: PathBuf,
+        
+        // image size
+        #[arg(long, short)]
+        size: u64,
+    },
+
+    Mount {
+        // mount point
+        #[arg(long, short, value_name="MOUNT_POINT", default_value = "./mnt")]
+        path: PathBuf,
+        
+        // verbosity
+        #[arg(short, value_name="verbosity", default_value = "3")]
+        verbosity: u32,
+
+        // auto unmount on process exit
+        #[arg(long, short)]
+        auto_unmount: bool,
+    }
 }
 
 fn main() {
@@ -31,31 +50,36 @@ fn main() {
     // let mountpoint = env::args_os().nth(1).unwrap();
     // fuser::mount2(NullFS, mountpoint, &[MountOption::AutoUnmount]).unwrap();
     let cli = CLI::parse();
-    // print the value of image_path
-    println!("image_path: {:?}", cli.image_path);
-    // print the value of mountpoint
-    println!("mountpoint: {:?}", cli.mountpoint);
-    // print the value of verbosity
-    println!("verbosity: {:?}", cli.verbosity);
-    // print the value of auto_unmount
-    println!("auto_unmount: {:?}", cli.auto_unmount);
+
+
+    // match subcommands
+    match cli.commands {
+        Commands::Mkfs { path, size } => {
+            // just print and raise not implementd
+            println!("mkfs: path: {:?}, size: {}", path, size);
+            unimplemented!();
+        },
+        Commands::Mount { path, verbosity, auto_unmount } => {
+            // just print and raise not implementd
+            println!("mount: path: {:?}, verbosity: {}, auto_unmount: {}", path, verbosity, auto_unmount);
+            unimplemented!();
+        },
+    }
     
-    let log_level = match cli.verbosity {
-        0 => LevelFilter::Error,
-        1 => LevelFilter::Warn,
-        2 => LevelFilter::Info,
-        3 => LevelFilter::Debug,
-        _ => LevelFilter::Trace,
-    };
+    // let log_level = match cli.verbosity {
+    //     0 => LevelFilter::Error,
+    //     1 => LevelFilter::Warn,
+    //     2 => LevelFilter::Info,
+    //     3 => LevelFilter::Debug,
+    //     _ => LevelFilter::Trace,
+    // };
     
     // print log level
-    println!("log level: {:?}", log_level);
+    // println!("log level: {:?}", log_level);
 
-    env_logger::builder()
-    .format_timestamp_nanos()
-    .filter_level(log_level)
-    .init();
+    // env_logger::builder()
+    // .format_timestamp_nanos()
+    // .filter_level(log_level)
+    // .init();
     
-
-
 }
