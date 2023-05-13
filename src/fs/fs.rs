@@ -1,7 +1,7 @@
 // Disk layout:
 // [ boot block | super block | log | inode blocks | free bit map | data blocks]
 
-const FATPIGEORZMAGIC: u32 = 0x10203040;
+const FATPIGEORZMAGIC: u32 = 0x00114514;
 const ROOTINO: u32 = 1;
 const BSIZE: u32 = 1024;
 

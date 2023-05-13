@@ -1,9 +1,8 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
-use super::buffer::BlockDevice;
+use super::buffer::{BlockDevice, BLOCK_SIZE};
 
-const BLOCK_SIZE: usize = 512;
 
 pub struct FileDisk(Mutex<File>);
 
