@@ -1,36 +1,10 @@
-use std::{sync::{Mutex, Arc, RwLock}, vec, cell::RefCell};
-use clap::builder::NonEmptyStringValueParser;
+use std::{sync::{Mutex, Arc, RwLock}, vec, ptr::NonNull, collections::HashMap};
 use lazy_static::*;
-use super::lru::*;
+use super::linkedlist::*;
 
 pub const BLOCK_SIZE : usize = 512;
 pub const BLOCK_NUM : usize = 64;
 pub const SHARD_NUM : usize = 16;
-
-pub trait BlockDevice : Send + Sync {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]);
-    fn write_block(&self, block_id: usize, buf: &[u8]);
-}
-
-pub struct BufferLayer {
-    buffer_pool: Vec<Arc<RwLock<BufferBlock>>>,
-    
-    // LRU, manage the buffer pool
-    // lru: HandleTable,
-}
-
-impl BufferLayer {
-    pub fn new() -> Self {
-        let mut buffer_pool = Vec::with_capacity(BLOCK_NUM);
-        for _ in 0..BLOCK_NUM {
-            buffer_pool.push(Arc::new(RwLock::new(BufferBlock::new())));
-        }
-        Self {
-            buffer_pool: buffer_pool,
-            // lru: HandleTable::new(BLOCK_NUM, SHARD_NUM),
-        }
-    }
-}
 
 pub struct BufferBlock {
     dirty: bool,
@@ -87,6 +61,57 @@ impl BufferBlock {
     }
 }
 
+// <K, V> = <block_id, buffer_block>
+struct LruHandle {
+    pub map: HashMap<usize, NonNull<Node<Arc<RwLock<BufferBlock>>>>>,
+    pub list: LinkedList<Arc<RwLock<BufferBlock>>>,
+}
+
+impl LruHandle {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            list: LinkedList::new(),
+        }
+    }
+
+    pub fn get(&mut self, block_id : usize, block_device: Arc<dyn BlockDevice>)  -> Arc<RwLock<BufferBlock>> {
+        if let Some(node) = self.map.get(&block_id) {
+            self.list.unlink_node(*node);
+        }
+        let block = Arc::new(RwLock::new(BufferBlock::init_block(block_id, block_device)));
+        self.list.push_front(block.clone());
+        self.map.insert(block_id, self.list.head.unwrap());
+        block
+    }
+}
+    
+struct HandleTable {
+    handles : Vec<Arc<Mutex<LruHandle>>>,
+}
+
+impl HandleTable {
+    pub fn new(shard_num: usize, block_num: usize) -> Self {
+        let mut handles = Vec::with_capacity(shard_num);
+        for _ in 0..SHARD_NUM {
+            handles.push(Arc::new(Mutex::new(LruHandle::new())));
+        }
+        Self {
+            handles: handles,
+        }
+    }
+}
+
+pub trait BlockDevice : Send + Sync {
+    fn read_block(&self, block_id: usize, buf: &mut [u8]);
+    fn write_block(&self, block_id: usize, buf: &[u8]);
+}
+
+pub struct BufferLayer {
+    // LRU, manage the buffer pool
+    lru: HandleTable,
+}
+
 // test
 #[cfg(test)]
 mod tests {
@@ -96,9 +121,4 @@ mod tests {
     fn test_buf_data_size() {
         assert_eq!(std::mem::size_of::<BufferBlock>(), BLOCK_SIZE);
     }
-
-    #[test]
-    fn test_vec_copy() {
-    }
-
 }

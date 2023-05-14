@@ -28,7 +28,7 @@ pub struct Node<T> {
 }
 
 impl<T> Node<T> {
-    fn new(val: T) -> Node<T> {
+    pub fn new(val: T) -> Node<T> {
         Node {
             val,
             prev: None,
@@ -36,15 +36,15 @@ impl<T> Node<T> {
         }
     }
 
-    fn into_val(self: Box<Self>) -> T {
+    pub fn into_val(self: Box<Self>) -> T {
         self.val
     }
 }
 
 pub struct LinkedList<T> {
     length: usize,
-    head: Option<NonNull<Node<T>>>,
-    tail: Option<NonNull<Node<T>>>,
+    pub head: Option<NonNull<Node<T>>>,
+    pub tail: Option<NonNull<Node<T>>>,
     _marker: PhantomData<Box<Node<T>>>,
 }
 
