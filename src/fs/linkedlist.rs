@@ -21,7 +21,7 @@ impl error::Error for IndexOutOfRangeError {
     }
 }
 
-struct Node<T> {
+pub struct Node<T> {
     val: T,
     next: Option<NonNull<Node<T>>>,
     prev: Option<NonNull<Node<T>>>,
@@ -174,6 +174,10 @@ impl<T> LinkedList<T> {
     pub fn peek_back(&self) -> Option<&T> {
         unsafe { self.tail.as_ref().map(|node| &node.as_ref().val) }
     }
+    
+    pub fn peek_back_node(&self) -> Option<NonNull<Node<T>>> {
+        self.tail
+    }
 
     /// Provides a mutable reference to the front element, or `None` if the list
     /// is empty.
@@ -181,6 +185,10 @@ impl<T> LinkedList<T> {
     /// This operation should compute in *O*(1) time.
     pub fn peek_front_mut(&mut self) -> Option<&mut T> {
         unsafe { self.head.as_mut().map(|node| &mut node.as_mut().val) }
+    }
+    
+    pub fn peek_front_node(&self) -> Option<NonNull<Node<T>>> {
+        self.head
     }
 
     /// Provides a mutable reference to the back element, or `None` if the list
@@ -396,7 +404,7 @@ impl<T> LinkedList<T> {
     /// This method takes care not to create mutable references to `element`,
     /// to maintain validity of aliasing pointers.
     #[inline]
-    fn unlink_node(&mut self, mut node: NonNull<Node<T>>) {
+    pub fn unlink_node(&mut self, mut node: NonNull<Node<T>>) {
         let node = unsafe { node.as_mut() }; // this one is ours now, we can create an &mut.
 
         // Not creating new mutable (unique!) references overlapping `element`.

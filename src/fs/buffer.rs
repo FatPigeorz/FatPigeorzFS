@@ -1,9 +1,11 @@
 use std::{sync::{Mutex, Arc, RwLock}, vec, cell::RefCell};
 use clap::builder::NonEmptyStringValueParser;
 use lazy_static::*;
+use super::lru::*;
 
 pub const BLOCK_SIZE : usize = 512;
 pub const BLOCK_NUM : usize = 64;
+pub const SHARD_NUM : usize = 16;
 
 pub trait BlockDevice : Send + Sync {
     fn read_block(&self, block_id: usize, buf: &mut [u8]);
@@ -13,7 +15,8 @@ pub trait BlockDevice : Send + Sync {
 pub struct BufferLayer {
     buffer_pool: Vec<Arc<RwLock<BufferBlock>>>,
     
-    // LRU
+    // LRU, manage the buffer pool
+    // lru: HandleTable,
 }
 
 impl BufferLayer {
@@ -24,6 +27,7 @@ impl BufferLayer {
         }
         Self {
             buffer_pool: buffer_pool,
+            // lru: HandleTable::new(BLOCK_NUM, SHARD_NUM),
         }
     }
 }
