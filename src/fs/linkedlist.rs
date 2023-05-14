@@ -22,9 +22,9 @@ impl error::Error for IndexOutOfRangeError {
 }
 
 pub struct Node<T> {
-    val: T,
-    next: Option<NonNull<Node<T>>>,
-    prev: Option<NonNull<Node<T>>>,
+    pub val: T,
+    pub next: Option<NonNull<Node<T>>>,
+    pub prev: Option<NonNull<Node<T>>>,
 }
 
 impl<T> Node<T> {

@@ -1,10 +1,10 @@
-use std::{sync::{Mutex, Arc, RwLock}, vec, ptr::NonNull, collections::HashMap};
+use std::{sync::{Mutex, Arc, RwLock}, vec, ptr::NonNull, collections::HashMap, marker::PhantomData, fmt::{Debug, Formatter}, error::Error};
 use lazy_static::*;
 use super::linkedlist::*;
 
 pub const BLOCK_SIZE : usize = 512;
 pub const BLOCK_NUM : usize = 64;
-pub const SHARD_NUM : usize = 16;
+pub const SHARD_NUM : usize = 4;
 
 pub struct BufferBlock {
     dirty: bool,
@@ -40,7 +40,7 @@ impl BufferBlock {
             self.block_device.as_ref().unwrap().write_block(self.block_id, &self.data);
         }
     }
-
+    
     fn addr_of_offset(&self, offset: usize) -> usize {
         &self.data[offset] as *const u8 as usize
     }
@@ -61,43 +61,169 @@ impl BufferBlock {
     }
 }
 
-// <K, V> = <block_id, buffer_block>
+impl Drop for BufferBlock {
+    fn drop(&mut self) {
+        if self.dirty {
+            self.sync();
+        }
+    }
+}
+
+struct Node {
+    pub data: Arc<RwLock<BufferBlock>>,
+    pub next: Option<NonNull<Node>>,
+    pub prev: Option<NonNull<Node>>,
+}
+
+type NodePtr = NonNull<Node>;
 struct LruHandle {
-    pub map: HashMap<usize, NonNull<Node<Arc<RwLock<BufferBlock>>>>>,
-    pub list: LinkedList<Arc<RwLock<BufferBlock>>>,
+    pub map: HashMap<usize, NodePtr>,
+    pub head: Option<NodePtr>,
+    pub tail: Option<NodePtr>,
+    marker: PhantomData<Node>,
 }
 
 impl LruHandle {
     pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            list: LinkedList::new(),
+        // dummy head and dummy tail
+        unsafe {
+            let mut head = NonNull::new_unchecked(Box::leak(Box::new(Node {
+                data: Arc::new(RwLock::new(BufferBlock::new())),
+                next: None,
+                prev: None,
+            })));
+            let mut tail = NonNull::new_unchecked(Box::leak(Box::new(Node {
+                data: Arc::new(RwLock::new(BufferBlock::new())),
+                next: None,
+                prev: None,
+            })));
+            head.as_mut().next = Some(tail);
+            tail.as_mut().prev = Some(head);
+            Self {
+                map: HashMap::new(),
+                head: Some(head),
+                tail: Some(tail),
+                marker: PhantomData,
+            }
         }
     }
+    
 
-    pub fn get(&mut self, block_id : usize, block_device: Arc<dyn BlockDevice>)  -> Arc<RwLock<BufferBlock>> {
-        if let Some(node) = self.map.get(&block_id) {
-            self.list.unlink_node(*node);
+    pub fn get(&mut self, block_id : &usize, block_device: Arc<dyn BlockDevice>)  -> Option<Arc<RwLock<BufferBlock>>> {
+        if let Some(node) = self.map.get(block_id) {
+            // move the node to the back
+            self.unlink_node(*node);
+            self.push_back(*node);
+            return unsafe {Some(node.as_ref().data.clone())};
+        } else {
+            unsafe {
+                // pre  lru
+                println!("pre get lru: {:?}", self);
+                println!("\tmap:{:?}", self.map);
+                let mut cursor = self.head.unwrap().as_mut().next;
+                while let Some(mut node) = cursor.unwrap().as_mut().next {
+                    // if cursor is tail, the next is None, loop break
+                    node = cursor.unwrap();
+                    if Arc::strong_count(&node.as_ref().data) == 1 {
+                        self.map.remove(&node.as_ref().data.read().unwrap().block_id);
+                        self.unlink_node(node);
+                        let new_node = NodePtr::new(Box::into_raw(Box::new(Node {
+                            data: Arc::new(RwLock::new(BufferBlock::init_block(*block_id, block_device))),
+                            next: None,
+                            prev: None,
+                        }))).unwrap();
+                        self.push_back(new_node);
+                        self.map.insert(*block_id, new_node);
+                        println!("after get lru: {:?}", self);
+                        println!("\tmap:{:?}", self.map);
+                        return Some(new_node.as_ref().data.clone()); 
+                    }
+                    cursor = node.as_mut().next;
+                }
+                None
+            }
+            }
         }
-        let block = Arc::new(RwLock::new(BufferBlock::init_block(block_id, block_device)));
-        self.list.push_front(block.clone());
-        self.map.insert(block_id, self.list.head.unwrap());
-        block
+    
+    #[inline]
+    fn push_front(&self, mut node: NonNull<Node>) {
+        unsafe {
+            node.as_mut().next = self.head.unwrap().as_mut().next;
+            node.as_mut().prev = Some(self.head.unwrap());
+            self.head.unwrap().as_mut().next.unwrap().as_mut().prev = Some(node);
+            self.head.unwrap().as_mut().next = Some(node);
+        }
+    }
+    
+    #[inline]
+    fn push_back(&self, mut node: NonNull<Node>) {
+        unsafe {
+            node.as_mut().prev = self.tail.unwrap().as_mut().prev;
+            node.as_mut().next = Some(self.tail.unwrap());
+            self.tail.unwrap().as_mut().prev.unwrap().as_mut().next = Some(node);
+            self.tail.unwrap().as_mut().prev = Some(node);
+        }
+    }
+    
+    #[inline]
+    fn unlink_node(&self, mut node: NonNull<Node>) {
+        unsafe {
+            node.as_mut().prev.unwrap().as_mut().next = node.as_mut().next;
+            node.as_mut().next.unwrap().as_mut().prev = node.as_mut().prev;
+            node.as_mut().prev = None;
+            node.as_mut().next = None;
+            let _ = Box::from_raw(node.as_ptr());
+        }
     }
 }
     
+
+impl Debug for LruHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        unsafe {
+            let mut cursor = self.head.unwrap().as_mut().next;
+            while let Some(_) = cursor.unwrap().as_mut().next {
+                let _ = write!(f, "{:?}-", cursor.unwrap().as_ref().data.read().unwrap().block_id);
+                cursor = Some(cursor.unwrap().as_mut().next.unwrap());
+            }
+        }
+        Ok(())
+    }
+}
 struct HandleTable {
     handles : Vec<Arc<Mutex<LruHandle>>>,
 }
 
 impl HandleTable {
     pub fn new(shard_num: usize, block_num: usize) -> Self {
+        assert_eq!(block_num % shard_num, 0);
         let mut handles = Vec::with_capacity(shard_num);
-        for _ in 0..SHARD_NUM {
-            handles.push(Arc::new(Mutex::new(LruHandle::new())));
+        for _ in 0..shard_num {
+            let handle = LruHandle::new();
+            // push block_num / shard_num nodes
+            for _ in 0..(block_num / shard_num) {
+                let node = NodePtr::new(Box::into_raw(Box::new(Node {
+                    data: Arc::new(RwLock::new(BufferBlock::new())),
+                    next: None,
+                    prev: None,
+                }))).unwrap();
+                handle.push_front(node);
+            }
+            handles.push(Arc::new(Mutex::new(handle)));
         }
         Self {
             handles: handles,
+        }
+    }
+    
+    pub fn get(&mut self, block_id: &usize, block_device: Arc<dyn BlockDevice>) -> Arc<RwLock<BufferBlock>> {
+        let shard_id = block_id % SHARD_NUM;
+        // continue get until the block is in the buffer pool
+        loop {
+            let mut handle = self.handles[shard_id].lock().unwrap();
+            if let Some(block) = handle.get(block_id, block_device.clone()) {
+                return block;
+            }
         }
     }
 }
@@ -115,10 +241,106 @@ pub struct BufferLayer {
 // test
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs::{OpenOptions, File};
 
+    use super::*;
     #[test]
-    fn test_buf_data_size() {
-        assert_eq!(std::mem::size_of::<BufferBlock>(), BLOCK_SIZE);
+    fn test_lru() {
+        let lru = LruHandle::new();
+        let node1 = NodePtr::new(Box::into_raw(Box::new(Node {
+            data: Arc::new(RwLock::new(BufferBlock::new())),
+            next: None,
+            prev: None,
+        }))).unwrap();
+        unsafe { node1.as_ref().data.write().unwrap().block_id = 0 };
+        let node2 = NodePtr::new(Box::into_raw(Box::new(Node {
+            data: Arc::new(RwLock::new(BufferBlock::new())),
+            next: None,
+            prev: None,
+        }))).unwrap();
+        unsafe { node2.as_ref().data.write().unwrap().block_id = 1 };
+        let node3 = NodePtr::new(Box::into_raw(Box::new(Node {
+            data: Arc::new(RwLock::new(BufferBlock::new())),
+            next: None,
+            prev: None,
+        }))).unwrap();
+        unsafe { node3.as_ref().data.write().unwrap().block_id = 2 };
+        lru.push_front(node1);
+        lru.push_front(node2);
+        lru.push_front(node3);
+        println!("{:?}", lru);
+        unsafe {
+            assert_eq!(lru.head.unwrap().as_ref().next.unwrap().as_ref().data.read().unwrap().block_id, 2);
+            assert_eq!(lru.head.unwrap().as_ref().next.unwrap().as_ref().next.unwrap().as_ref().data.read().unwrap().block_id, 1);
+            assert_eq!(lru.head.unwrap().as_ref().next.unwrap().as_ref().next.unwrap().as_ref().next.unwrap().as_ref().data.read().unwrap().block_id, 0);
+        }
+        lru.unlink_node(node2);
+        // node 2 has been drop
+        unsafe {
+            assert_eq!(lru.head.unwrap().as_ref().next.unwrap().as_ref().data.read().unwrap().block_id, 2);
+            assert_eq!(lru.head.unwrap().as_ref().next.unwrap().as_ref().next.unwrap().as_ref().data.read().unwrap().block_id, 0);
+        }
+    }
+    
+    #[test]
+    fn test_strong_ref_cnt() {
+        let block = Arc::new(RwLock::new(BufferBlock::new()));
+        let node = NodePtr::new(Box::into_raw(Box::new(Node {
+            data: block,
+            next: None,
+            prev: None,
+        }))).unwrap();
+
+        let node2 = node.clone();
+        let _ = node.clone();
+        let _ = node.clone();
+        let mut node5 = node.clone();
+        unsafe { assert_eq!(Arc::strong_count(&node2.as_ref().data), 1); }
+        
+        let _data  = unsafe { node5.as_mut().data.clone() };
+
+        // get_ref_cnt
+        unsafe { assert_eq!(Arc::strong_count(&node2.as_ref().data), 2); }
+    }
+    
+    #[test]
+    fn test_get() {
+        let mut table = HandleTable::new(SHARD_NUM, BLOCK_NUM);
+        use super::super::filedisk::FileDisk;
+        let file: File= OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("./test.img")
+            .unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        let file_disk = Arc::new(FileDisk::new(file));
+        file_disk.write_block(0, &[1; 512]);
+        let buffer = table.get(&0, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [1; 512]);
+        file_disk.write_block(1, &[2; 512]);
+        let buffer = table.get(&1, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [2; 512]);
+        file_disk.write_block(2, &[3; 512]);
+        let buffer = table.get(&2, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [3; 512]);
+        file_disk.write_block(3, &[4; 512]);
+        let buffer = table.get(&3, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [4; 512]);
+        file_disk.write_block(4, &[5; 512]);
+        let buffer = table.get(&4, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [5; 512]);
+        file_disk.write_block(5, &[6; 512]);
+        let buffer = table.get(&5, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [6; 512]);
+        file_disk.write_block(6, &[7; 512]);
+        let buffer = table.get(&6, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [7; 512]);
+        file_disk.write_block(7, &[8; 512]);
+        let buffer = table.get(&7, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [8; 512]);
+        file_disk.write_block(8, &[9; 512]);
+        let buffer = table.get(&8, file_disk.clone());
+        assert_eq!(buffer.read().unwrap().data, [9; 512]);
     }
 }

@@ -3,8 +3,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 use super::buffer::{BlockDevice, BLOCK_SIZE};
 
-
 pub struct FileDisk(Mutex<File>);
+
+impl FileDisk {
+    pub fn new(file: File) -> Self {
+        Self(Mutex::new(file))
+    }
+}
 
 impl BlockDevice for FileDisk {
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
