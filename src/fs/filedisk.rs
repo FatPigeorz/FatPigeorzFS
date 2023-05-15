@@ -36,13 +36,14 @@ mod test {
     #[test]
     fn test_file_disk() {
         // print pwd
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open("./test.img")
             .unwrap();
         file.set_len(1024 * 1024).unwrap();
+        file.write_all(&[0; 1024 * 1024]).unwrap();
         let file_disk = FileDisk(Mutex::new(file));
         let mut buf = [0; 512];
         file_disk.write_block(0, &[1; 512]);

@@ -1,11 +1,12 @@
 use std::{sync::{Mutex, Arc, RwLock}, vec, ptr::NonNull, collections::HashMap, marker::PhantomData, fmt::{Debug, Formatter}};
-use lazy_static::*;
+use log::{debug, error, log_enabled, info, Level};
+
 
 pub const BLOCK_SIZE : usize = 512;
 pub const BLOCK_NUM : usize = 64;
 pub const SHARD_NUM : usize = 4;
 
-struct BufferBlock {
+pub struct BufferBlock {
     dirty: bool,
     block_id: usize,
     block_device: Option<Arc<dyn BlockDevice>>,
@@ -34,29 +35,29 @@ impl BufferBlock {
     }
 
     pub fn sync(&mut self) {
-        println!("sync block {}", self.block_id);
+        // log sync
         if self.dirty {
             self.dirty = false;
             self.block_device.as_ref().unwrap().write_block(self.block_id, &self.data);
         }
     }
     
-    fn addr_of_offset(&self, offset: usize) -> usize {
+    fn offset_addr(&self, offset: usize) -> usize {
         &self.data[offset] as *const u8 as usize
     }
     
-    pub fn get_ref<T>(&self, offset: usize) -> &T where T: Sized {
+    pub fn as_ref<T>(&self, offset: usize) -> &T where T: Sized {
         let type_size = core::mem::size_of::<T>();
         assert!(offset + type_size <= BLOCK_SIZE);
-        let addr = self.addr_of_offset(offset);
+        let addr = self.offset_addr(offset);
         unsafe { &*(addr as *const T) }
     }
 
-    pub fn get_mut<T>(&mut self, offset: usize) -> &mut T where T: Sized {
+    pub fn as_mut<T>(&mut self, offset: usize) -> &mut T where T: Sized {
         let type_size = core::mem::size_of::<T>();
         assert!(offset + type_size <= BLOCK_SIZE);
         self.dirty = true;
-        let addr = self.addr_of_offset(offset);
+        let addr = self.offset_addr(offset);
         unsafe { &mut *(addr as *mut T) }
     }
 }
@@ -74,12 +75,16 @@ struct Node {
 }
 
 type NodePtr = NonNull<Node>;
+
 struct LruHandle {
     map: HashMap<usize, NodePtr>,
     head: Option<NodePtr>,
     tail: Option<NodePtr>,
     marker: PhantomData<Node>,
 }
+
+unsafe impl Send for LruHandle {}
+unsafe impl Sync for LruHandle {}
 
 impl LruHandle {
     pub fn new() -> Self {
@@ -120,7 +125,7 @@ impl LruHandle {
                     node = cursor.unwrap();
                     if Arc::strong_count(&node.as_ref().data) == 1 {
                         self.map.remove(&node.as_ref().data.read().unwrap().block_id);
-                        self.unlink_node(node);
+                        let _ = self.unlink_node(node);
                         let new_node = NodePtr::new(Box::into_raw(Box::new(Node {
                             data: Arc::new(RwLock::new(BufferBlock::init_block(*block_id, block_device))),
                             next: None,
@@ -182,7 +187,7 @@ impl Debug for LruHandle {
     }
 }
 
-struct HandleTable {
+pub struct HandleTable {
     handles : Vec<Arc<Mutex<LruHandle>>>,
 }
 
@@ -225,15 +230,20 @@ pub trait BlockDevice : Send + Sync {
     fn write_block(&self, block_id: usize, buf: &[u8]);
 }
 
-struct BufferLayer {
-    // LRU, manage the buffer pool
-    lru: HandleTable,
+use once_cell::sync::Lazy;
+static mut BUFFER_LAYER: Lazy<HandleTable> = Lazy::new(|| HandleTable::new(SHARD_NUM, BLOCK_NUM));
+
+pub fn buffer_read(
+    block_id: usize,
+    block_device: Arc<dyn BlockDevice>
+) -> Arc<RwLock<BufferBlock>> {
+    unsafe { BUFFER_LAYER.get(&block_id, block_device).clone() }
 }
 
 // test
 #[cfg(test)]
 mod tests {
-    use std::{fs::{OpenOptions, File}, io::Write};
+    use std::{fs::{OpenOptions, File}, io::Write, thread};
 
     use super::*;
     #[test]
@@ -344,7 +354,43 @@ mod tests {
             filedisk.write_block(i, &[i as u8; 512]);
         }
 
-        // new handle table
+        // get buffer
+        let mut table = HandleTable::new(SHARD_NUM, BLOCK_NUM);
+        for i in 0..32 {
+            let buffer = table.get(&((i * 4) % 64), filedisk.clone());
+            assert_eq!(Arc::strong_count(&buffer), 2);
+            assert_eq!(buffer.read().unwrap().data, [((i * 4) % 64) as u8; 512]);
+        }
+    }
+    
+    #[test]
+    fn test_layer() {
+        use super::super::filedisk::FileDisk;
+        let mut file: File= OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("./test.img")
+            .unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        file.write_all(&[0 as u8; 1024*1024]).unwrap();
+        let filedisk = Arc::new(FileDisk::new(file));
+        for i in 0..64 {
+            filedisk.write_block(i, &[64 - i as u8; 512]);
+        }
 
+        // 64 thread
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let filedisk = filedisk.clone();
+            let handle = thread::spawn(move || {
+                for j in 0..64 {
+                    let buffer = buffer_read(j, filedisk.clone());
+                    assert_eq!(buffer.clone().read().unwrap().data, [(64 - j) as u8; 512]);
+                }
+            });
+            handles.push(handle);
+        }
+        handles.into_iter().for_each(|handle| handle.join().unwrap());
     }
 }
