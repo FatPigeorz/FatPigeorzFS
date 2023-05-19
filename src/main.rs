@@ -1,4 +1,5 @@
 pub mod fs;
+mod mkfs;
 
 use fuser::{Filesystem};
 use clap::{Parser, Subcommand};
@@ -7,6 +8,8 @@ use std::path::PathBuf;
 struct NullFS;
 
 impl Filesystem for NullFS {}
+
+
 #[derive(Parser, Debug)]
 #[command(name = "FatPigeorzFS")]
 #[command(author = "FatPigeorz <github.com/FatPigeorz>")]
@@ -27,7 +30,7 @@ enum Commands {
         
         // image size
         #[arg(long, short)]
-        size: u64,
+        size: u32,
     },
 
     Mount {
@@ -57,7 +60,7 @@ fn main() {
         Commands::Mkfs { path, size } => {
             // just print and raise not implementd
             println!("mkfs: path: {:?}, size: {}", path, size);
-            unimplemented!();
+            mkfs::mkfs(path, size);
         },
         Commands::Mount { path, verbosity, auto_unmount } => {
             // just print and raise not implementd

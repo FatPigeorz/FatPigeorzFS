@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
-use super::buffer::{BlockDevice, BLOCK_SIZE};
+use super::fs::{BlockDevice, BLOCK_SIZE};
 
 pub struct FileDisk(Mutex<File>);
 
@@ -12,21 +12,20 @@ impl FileDisk {
 }
 
 impl BlockDevice for FileDisk {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+    fn read_block(&self, block_id: u32, buf: &mut [u8]) {
         let mut file = self.0.lock().unwrap();
         file.seek(SeekFrom::Start((block_id * BLOCK_SIZE) as u64)).unwrap();
         // TODO: async read
         file.read_exact(buf).unwrap();
     }
 
-    fn write_block(&self, block_id: usize, buf: &[u8]) {
+    fn write_block(&self, block_id: u32, buf: &[u8]) {
         let mut file = self.0.lock().unwrap();
         file.seek(SeekFrom::Start((block_id * BLOCK_SIZE) as u64)).unwrap();
         // TODO: async write
         file.write_all(buf).unwrap();
     }
 }
-
 
 #[allow(unused_imports)]
 mod test {

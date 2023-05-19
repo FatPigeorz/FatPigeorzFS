@@ -1,14 +1,8 @@
 use std::{sync::{Mutex, Arc, RwLock}, vec, ptr::NonNull, collections::HashMap, marker::PhantomData, fmt::{Debug, Formatter}};
-use log::{debug, error, log_enabled, info, Level};
-
-
-pub const BLOCK_SIZE : usize = 512;
-pub const BLOCK_NUM : usize = 64;
-pub const SHARD_NUM : usize = 4;
-
+use super::fs::{BLOCK_SIZE, BLOCK_NUM, SHARD_NUM, BlockDevice};
 pub struct BufferBlock {
     dirty: bool,
-    block_id: usize,
+    block_id: u32,
     block_device: Option<Arc<dyn BlockDevice>>,
     data: Vec<u8>,
 }
@@ -19,18 +13,18 @@ impl BufferBlock {
             dirty: false,
             block_id: 0,
             block_device: None,
-            data: vec![0; BLOCK_SIZE],
+            data: vec![0; BLOCK_SIZE as usize],
         }
     }
 
-    pub fn init_block(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Self {
-        let mut data = vec![0; BLOCK_SIZE];
-        block_device.read_block(block_id, data.as_mut());
+    pub fn init_block(block_id: u32, block_device: Arc<dyn BlockDevice>) -> Self {
+        let mut data = [0u8; BLOCK_SIZE as usize];
+        block_device.read_block(block_id, &mut data);
         Self {
             dirty: false,
-            block_id: block_id,
+            block_id,
             block_device: Some(block_device),
-            data: data,
+            data: Vec::from(data),
         }
     }
 
@@ -48,19 +42,34 @@ impl BufferBlock {
     
     pub fn as_ref<T>(&self, offset: usize) -> &T where T: Sized {
         let type_size = core::mem::size_of::<T>();
-        assert!(offset + type_size <= BLOCK_SIZE);
+        assert!(offset + type_size <= BLOCK_SIZE as usize);
         let addr = self.offset_addr(offset);
         unsafe { &*(addr as *const T) }
     }
 
     pub fn as_mut<T>(&mut self, offset: usize) -> &mut T where T: Sized {
         let type_size = core::mem::size_of::<T>();
-        assert!(offset + type_size <= BLOCK_SIZE);
+        assert!(offset + type_size <= BLOCK_SIZE as usize);
         self.dirty = true;
         let addr = self.offset_addr(offset);
         unsafe { &mut *(addr as *mut T) }
     }
+
+    pub fn id(&self) -> u32 {
+        self.block_id
+    }
 }
+
+impl BufferBlock {
+    pub fn read<T, V>(&self, offset: usize, f: impl FnOnce(&T) -> V) -> V {
+        f(self.as_ref(offset))
+    }
+
+    pub fn write<T, V>(&mut self, offset:usize, f: impl FnOnce(&mut T) -> V) -> V {
+        f(self.as_mut(offset))
+    }
+}
+
 
 impl Drop for BufferBlock {
     fn drop(&mut self) {
@@ -77,7 +86,7 @@ struct Node {
 type NodePtr = NonNull<Node>;
 
 struct LruHandle {
-    map: HashMap<usize, NodePtr>,
+    map: HashMap<u32, NodePtr>,
     head: Option<NodePtr>,
     tail: Option<NodePtr>,
     marker: PhantomData<Node>,
@@ -111,9 +120,9 @@ impl LruHandle {
         }
     }
 
-    pub fn get(&mut self, block_id : &usize, block_device: Arc<dyn BlockDevice>)  -> Option<Arc<RwLock<BufferBlock>>> {
+    pub fn get(&mut self, block_id : &u32, block_device: Arc<dyn BlockDevice>)  -> Option<Arc<RwLock<BufferBlock>>> {
         // print block_id
-        if let Some(node) = self.map.get(block_id) {
+        if let Some(node) = self.map.get(&block_id) {
             // buffer hit!
             let node = unsafe { NonNull::new_unchecked(Box::leak(self.unlink_node(*node))) };
             self.push_back(node);
@@ -173,7 +182,21 @@ impl LruHandle {
         }
     }
 }
-    
+
+impl Drop for LruHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let mut cursor = self.head.unwrap().as_mut().next;
+            while let Some(mut node) = cursor.unwrap().as_mut().next {
+                node = cursor.unwrap();
+                println!("drop block_id: {}", node.as_ref().data.read().unwrap().block_id);
+                cursor = node.as_mut().next;
+                let _ = self.unlink_node(node);
+            }
+        }
+    }
+}   
+
 impl Debug for LruHandle {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         unsafe {
@@ -192,9 +215,9 @@ pub struct HandleTable {
 }
 
 impl HandleTable {
-    pub fn new(shard_num: usize, block_num: usize) -> Self {
+    pub fn new(shard_num: u32, block_num: u32) -> Self {
         assert_eq!(block_num % shard_num, 0);
-        let mut handles = Vec::with_capacity(shard_num);
+        let mut handles = Vec::with_capacity(shard_num as usize);
         for _ in 0..shard_num {
             let handle = LruHandle::new();
             // push block_num / shard_num nodes
@@ -213,11 +236,11 @@ impl HandleTable {
         }
     }
     
-    pub fn get(&mut self, block_id: &usize, block_device: Arc<dyn BlockDevice>) -> Arc<RwLock<BufferBlock>> {
-        let shard_id = block_id % SHARD_NUM;
+    pub fn get(&mut self, block_id: &u32, block_device: Arc<dyn BlockDevice>) -> Arc<RwLock<BufferBlock>> {
+        let shard_id = block_id % (SHARD_NUM as u32);
         // continue get until the block is in the buffer pool
         loop {
-            let mut handle = self.handles[shard_id].lock().unwrap();
+            let mut handle = self.handles[shard_id as usize].lock().unwrap();
             if let Some(block) = handle.get(block_id, block_device.clone()) {
                 return block;
             }
@@ -225,16 +248,11 @@ impl HandleTable {
     }
 }
 
-pub trait BlockDevice : Send + Sync {
-    fn read_block(&self, block_id: usize, buf: &mut [u8]);
-    fn write_block(&self, block_id: usize, buf: &[u8]);
-}
-
 use once_cell::sync::Lazy;
 static mut BUFFER_LAYER: Lazy<HandleTable> = Lazy::new(|| HandleTable::new(SHARD_NUM, BLOCK_NUM));
 
-pub fn buffer_read(
-    block_id: usize,
+pub fn get_buffer_block(
+    block_id: u32,
     block_device: Arc<dyn BlockDevice>
 ) -> Arc<RwLock<BufferBlock>> {
     unsafe { BUFFER_LAYER.get(&block_id, block_device).clone() }
@@ -385,7 +403,7 @@ mod tests {
             let filedisk = filedisk.clone();
             let handle = thread::spawn(move || {
                 for j in 0..64 {
-                    let buffer = buffer_read(j, filedisk.clone());
+                    let buffer = get_buffer_block(j, filedisk.clone());
                     assert_eq!(buffer.clone().read().unwrap().data, [(64 - j) as u8; 512]);
                 }
             });
@@ -393,4 +411,5 @@ mod tests {
         }
         handles.into_iter().for_each(|handle| handle.join().unwrap());
     }
+
 }
