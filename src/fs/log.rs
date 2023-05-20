@@ -1,4 +1,4 @@
-use std::sync::{Mutex, Arc, Condvar, RwLock, MutexGuard, RwLockWriteGuard};
+use std::sync::{Mutex, Arc, Condvar, RwLock, RwLockWriteGuard};
 
 use once_cell::sync::Lazy;
 
@@ -28,7 +28,6 @@ pub struct Log {
     head : u32,                                         // head block
     size : u32,                                         // log max size
     outstanding: u32,
-    committing: bool,
     buffer_outstanding: Vec<Arc<RwLock<BufferBlock>>>,  // for performance, the log buffer should in memory
     lh : LogHeader,                                     // log header
 }
@@ -40,7 +39,6 @@ impl Log {
             head : 0,
             size : 0,
             outstanding : 0,
-            committing: false,
             buffer_outstanding : Vec::new(),
             lh : LogHeader::new(),
         }
@@ -77,6 +75,10 @@ impl Log {
 
     pub fn install_commit(&mut self) {
         for i in 0..self.lh.n {
+            if self.lh.block[i as usize] == self.head + i + 1 {
+                panic!("log area overlap, head: {}, i: {}, block_id : {}", self.head, i, self.lh.block[i as usize]);
+            }
+            assert_ne!(self.lh.block[i as usize], self.head + i + 1);
             let to = get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone());
             let mut to_guard = to.write().unwrap();
             let from = get_buffer_block(self.lh.block[i as usize], self.dev.as_ref().unwrap().clone());
@@ -123,6 +125,7 @@ impl LogManager {
         let mut log_guard = self.0.lock().unwrap(); 
         loop {
             if (log_guard.lh.n + (log_guard.outstanding + 1) * MAXOPBLOCKS) > log_guard.size {
+                // this op might exhaust log space; wait for commit.
                 log_guard = self.1.wait(log_guard).unwrap();
             } else {
                 log_guard.outstanding += 1;
@@ -132,14 +135,13 @@ impl LogManager {
     }
 
     pub fn end_op(&self) {
-        let mut do_commit = false;
+        // let mut do_commit = false;
         let mut log_guard = self.0.lock().unwrap();
         assert!(log_guard.outstanding > 0);
         log_guard.outstanding -= 1;
         if log_guard.outstanding == 0 {
             log_guard.commit();
-        } 
-        drop(log_guard);
+        }
         self.1.notify_all();
     }
 
@@ -246,7 +248,7 @@ mod test {
     }
 
     #[test]
-    fn test_log_manager() {
+    fn test_mp() {
         let mut file: File= OpenOptions::new()
             .read(true)
             .write(true)
@@ -267,12 +269,12 @@ mod test {
         log.write_head();
         unsafe { LOG_MANAGER.init(&sb, filedisk.clone()) };
         let mut handles = Vec::new();
-        for i in 0..3u8 {
+        for i in 0..100u8 {
             let filedisk = filedisk.clone();
             let handle = thread::spawn(move || {
                 unsafe { LOG_MANAGER.begin_op() };
                 {
-                    let buffer = get_buffer_block(i as u32, filedisk.clone());
+                    let buffer = get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone());
                     let mut buffer_guard = buffer.write().unwrap();
                     let b: &mut [u8; 512] = buffer_guard.as_mut(0);
                     b[0] = i;
@@ -282,10 +284,11 @@ mod test {
             });
             handles.push(handle);
         }
+
         handles.into_iter().for_each(|handle| handle.join().unwrap());
-        
-        for i in 0..3u8 {
-            let buffer = get_buffer_block(i as u32, filedisk.clone());
+
+        for i in 0..100u8 {
+            let buffer = get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone());
             let buffer_guard = buffer.read().unwrap();
             let buffer: &[u8; 512] = buffer_guard.as_ref(0);
             assert_eq!(buffer[0], i);
