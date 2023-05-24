@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 
 use super::buffer::{get_buffer_block, BufferBlock};
 use super::fs::*;
+use super::superblock::SuperBlock;
 
 // Contents of the log header block, used for both the on-disk header block
 // and to keep track in memory of logged block before commit.
