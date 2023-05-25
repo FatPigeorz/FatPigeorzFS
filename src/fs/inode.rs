@@ -377,6 +377,7 @@ impl ICache {
             buf[start..start + copy_bytes]
                 .copy_from_slice(&src[start - off..start - off + copy_bytes]);
             start += copy_bytes;
+            log_write(&bp);
         }
         if off + len > inode.size as usize {
             inode.size = (off + len) as u32;
@@ -399,7 +400,7 @@ impl ICache {
         selfi: u32,
         linki: u32,
     ) -> Result<(), String> {
-        info!("dirlink: name: {}, inum: {}", name, selfi);
+        info!("dirlink: name: {}, inum: {}", name, linki);
         // check the name is not present
         if let Some((ip, _)) = self.dirlookup(dp, dev.clone(), name.clone()) {
             self.iput(ip);
@@ -416,7 +417,6 @@ impl ICache {
                 off,
                 std::mem::size_of::<DirEntry>(),
             )?;
-            // let de = bincode::deserialize::<DirEntry>(&buf).unwrap();
             let de = unsafe {
                 std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(buf)
             };
@@ -427,6 +427,7 @@ impl ICache {
         }
         let mut de = DirEntry::default();
         de.inum = linki;
+        nameassign(&mut de.name, &name);
         // get the byte
         let src =
             unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };

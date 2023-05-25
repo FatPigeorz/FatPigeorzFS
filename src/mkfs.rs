@@ -127,6 +127,7 @@ pub fn mkfs(path: PathBuf, size: u32) {
     iappend(&mut file, rootino, &sb, &buf, &mut freeblock);
 
     let mut de = DirEntry::default();
+    de.inum = rootino;
     nameassign(&mut de.name, &"..".to_string());
     let buf = unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };
     iappend(&mut file, rootino, &sb, &buf, &mut freeblock);
