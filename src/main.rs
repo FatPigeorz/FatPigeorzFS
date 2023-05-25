@@ -1,13 +1,10 @@
-pub mod fs;
+mod fs;
 mod mkfs;
 
 use clap::{Parser, Subcommand};
-use fuser::Filesystem;
+use env_logger::Builder;
+use fuser::{Filesystem, MountOption};
 use std::path::PathBuf;
-
-struct NullFS;
-
-impl Filesystem for NullFS {}
 
 #[derive(Parser, Debug)]
 #[command(name = "FatPigeorzFS")]
@@ -26,53 +23,29 @@ enum Commands {
         // the image path
         #[arg(long, short, value_name = "IMAGE_PATH", default_value = "./myDisk.img")]
         path: PathBuf,
-
         // image size
         #[arg(long, short)]
         size: u32,
     },
-
-    Mount {
-        // mount point
-        #[arg(long, short, value_name = "MOUNT_POINT", default_value = "./mnt")]
+    Shell {
+        // the image path
+        #[arg(long, short, value_name = "IMAGE_PATH", default_value = "./myDisk.img")]
         path: PathBuf,
-
-        // verbosity
-        #[arg(short, value_name = "verbosity", default_value = "3")]
-        verbosity: u32,
-
-        // auto unmount on process exit
-        #[arg(long, short)]
-        auto_unmount: bool,
     },
 }
 
 fn main() {
-    // env_logger::init();
-    // let mountpoint = env::args_os().nth(1).unwrap();
-    // fuser::mount2(NullFS, mountpoint, &[MountOption::AutoUnmount]).unwrap();
     let cli = CLI::parse();
-
     // match subcommands
     match cli.commands {
         Commands::Mkfs { path, size } => {
             // just print and raise not implementd
             println!("mkfs: path: {:?}, size: {}", path, size);
             mkfs::mkfs(path, size);
-        }
-        Commands::Mount {
-            path,
-            verbosity,
-            auto_unmount,
-        } => {
-            // just print and raise not implementd
-            println!(
-                "mount: path: {:?}, verbosity: {}, auto_unmount: {}",
-                path, verbosity, auto_unmount
-            );
-            unimplemented!();
-        }
+        },
+        Commands::Shell { path } => (),
     }
+    
 
     // let log_level = match cli.verbosity {
     //     0 => LevelFilter::Error,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::buffer::get_buffer_block;
-use super::fs::{BlockDevice, BLOCK_SIZE, FATPIGEORZMAGIC, SB_BLOCK};
+use super::fs::{BlockDevice, FATPIGEORZMAGIC, SB_BLOCK};
 use once_cell::sync::Lazy;
 
 // the super block of filesystem

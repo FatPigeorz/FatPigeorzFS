@@ -1,13 +1,3 @@
-use super::buffer::get_buffer_block;
-use super::buffer::BufferBlock;
-use super::file::*;
-use super::inode::*;
-use super::log::LOG_MANAGER;
-use super::superblock::*;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
-
 // Disk layout:
 // [ boot block | super block | log | inode blocks |  bit freemap | data blocks]
 pub const SB_BLOCK: u32 = 1;
@@ -32,6 +22,7 @@ pub const LOGSIZE: u32 = MAXOPBLOCKS * 3 + 1;
 
 pub const NINODES: u32 = 1024;
 // Inodes per block.
+use super::inode::Dinode;
 pub const IPB: u32 = BLOCK_SIZE / (std::mem::size_of::<Dinode>() as u32);
 
 pub const NFILE: u32 = 100;
@@ -40,58 +31,4 @@ pub const NOFILE: u32 = 16;
 pub trait BlockDevice: Send + Sync {
     fn read_block(&self, block_id: u32, buf: &mut [u8]);
     fn write_block(&self, block_id: u32, buf: &[u8]);
-}
-
-// the file system
-pub struct FileSystem {
-    pub device: Arc<dyn BlockDevice>,
-    pub sb: Option<Arc<RwLock<BufferBlock>>>,
-    pub lh: Option<Arc<RwLock<BufferBlock>>>,
-    pub bitmap: Option<Arc<RwLock<BufferBlock>>>,
-}
-
-impl FileSystem {
-    pub fn new(device: Arc<dyn BlockDevice>) -> Self {
-        let mut fs = Self {
-            device: device,
-            sb: None,
-            lh: None,
-            bitmap: None,
-        };
-        fs.init();
-        fs
-    }
-
-    fn init(&mut self) {
-        unsafe {
-            SB.init(self.device.clone());
-        }
-        self.sb = Some(get_buffer_block(SB_BLOCK, self.device.clone()));
-        unsafe { LOG_MANAGER.init(&SB, self.device.clone()) };
-        self.lh = Some(get_buffer_block(
-            unsafe { SB.logstart },
-            self.device.clone(),
-        ));
-        self.bitmap = Some(get_buffer_block(
-            unsafe { SB.bmapstart },
-            self.device.clone(),
-        ));
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    #[test]
-    fn test_filetype_as_u32() {
-        let filetype = FileType::Dir;
-        assert_eq!(filetype as u32, 2);
-        let filetype = FileType::File;
-        assert_eq!(filetype as u32, 1);
-        let filetype = FileType::None;
-        assert_eq!(filetype as u32, 0);
-    }
-
-    #[test]
-    fn test_init() {}
 }

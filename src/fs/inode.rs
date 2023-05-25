@@ -1,6 +1,5 @@
 use log::info;
 use once_cell::sync::Lazy;
-use std::collections::linked_list;
 use std::sync::RwLockWriteGuard;
 use std::{
     path::PathBuf,
@@ -581,8 +580,29 @@ impl ICache {
 
 pub static mut ICACHE: Lazy<ICache> = Lazy::new(|| ICache::new());
 
-pub fn ialloc(dev: Arc<dyn BlockDevice>, ftype: FileType) -> Option<Arc<Inode>> {
-    unsafe { ICACHE.ialloc(dev, ftype) }
+pub fn readi(
+    dev: Arc<dyn BlockDevice>,
+    inode: &mut MutexGuard<InodeData>,
+    dst: &mut [u8],
+    off: usize,
+    n: usize,
+) -> Result<(), String> {
+    unsafe { ICACHE.readi(dev, inode, dst, off, n) }
+}
+
+pub fn writei(
+    dev: Arc<dyn BlockDevice>,
+    inode: &mut MutexGuard<InodeData>,
+    inum: u32,
+    src: &[u8],
+    off: usize,
+    n: usize,
+) -> Result<usize, String> {
+    unsafe { ICACHE.writei(dev, inode, inum, src, off, n) }
+}
+
+pub fn iupdate(inode: &MutexGuard<InodeData>, inum: u32, dev: Arc<dyn BlockDevice>) {
+    unsafe { ICACHE.iupdate(inode, inum, dev) }
 }
 
 pub fn iput(inode: Arc<Inode>) {
@@ -649,8 +669,7 @@ pub fn nameassign(s: &mut [u8], t: &String) {
 #[cfg(test)]
 mod test {
     use std::{
-        fs::{create_dir, File, OpenOptions},
-        io::Write,
+        fs::{File, OpenOptions},
         thread,
     };
 
