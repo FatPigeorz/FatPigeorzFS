@@ -1,7 +1,7 @@
+use super::fs::{BlockDevice, BLOCK_SIZE};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
-use super::fs::{BlockDevice, BLOCK_SIZE};
 
 pub struct FileDisk(Mutex<File>);
 
@@ -14,14 +14,16 @@ impl FileDisk {
 impl BlockDevice for FileDisk {
     fn read_block(&self, block_id: u32, buf: &mut [u8]) {
         let mut file = self.0.lock().unwrap();
-        file.seek(SeekFrom::Start((block_id * BLOCK_SIZE) as u64)).unwrap();
+        file.seek(SeekFrom::Start((block_id * BLOCK_SIZE) as u64))
+            .unwrap();
         // TODO: async read
         file.read_exact(buf).unwrap();
     }
 
     fn write_block(&self, block_id: u32, buf: &[u8]) {
         let mut file = self.0.lock().unwrap();
-        file.seek(SeekFrom::Start((block_id * BLOCK_SIZE) as u64)).unwrap();
+        file.seek(SeekFrom::Start((block_id * BLOCK_SIZE) as u64))
+            .unwrap();
         // TODO: async write
         file.write_all(buf).unwrap();
     }
@@ -52,4 +54,3 @@ mod test {
         assert_eq!(buf, [0; 512]);
     }
 }
-

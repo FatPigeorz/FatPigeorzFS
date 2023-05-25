@@ -1,7 +1,12 @@
-use std::sync::Arc;
-use super::superblock::*;
-use super::bitmap::*;
+use super::buffer::get_buffer_block;
+use super::buffer::BufferBlock;
+use super::file::*;
 use super::inode::*;
+use super::log::LOG_MANAGER;
+use super::superblock::*;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
 
 // Disk layout:
 // [ boot block | super block | log | inode blocks |  bit freemap | data blocks]
@@ -16,70 +21,61 @@ pub const NAMESIZE: u32 = 14;
 pub const NINDIRECT: u32 = BLOCK_SIZE / std::mem::size_of::<u32>() as u32;
 pub const MAXFILE: u32 = NDIRECT + NINDIRECT + NINDIRECT * NINDIRECT;
 
-pub const BLOCK_SIZE : u32 = 512;
+pub const BLOCK_SIZE: u32 = 512;
 pub const BLOCK_NUM: u32 = MAXOPBLOCKS * 4;
-pub const SHARD_NUM : u32 = 4;
-
+pub const SHARD_NUM: u32 = 4;
 
 // Maxinum of blocks an FS op can write
 pub const MAXOPBLOCKS: u32 = 16;
 // Size of log buffer + log header
 pub const LOGSIZE: u32 = MAXOPBLOCKS * 3 + 1;
 
-pub const NINODES : u32 = 1024;
+pub const NINODES: u32 = 1024;
 // Inodes per block.
-pub const IPB : u32 = BLOCK_SIZE / (std::mem::size_of::<Dinode>() as u32);
+pub const IPB: u32 = BLOCK_SIZE / (std::mem::size_of::<Dinode>() as u32);
 
-#[inline]
-pub fn block_of_inode(inum: u32, sb: &SuperBlock) -> u32 {
-    (inum / IPB) + sb.inodestart
-}
+pub const NFILE: u32 = 100;
+pub const NOFILE: u32 = 16;
 
-pub trait BlockDevice : Send + Sync {
+pub trait BlockDevice: Send + Sync {
     fn read_block(&self, block_id: u32, buf: &mut [u8]);
     fn write_block(&self, block_id: u32, buf: &[u8]);
-}
-
-#[derive(Copy, Clone)]
-pub enum FileType {
-    None = 0,
-    File = 1,
-    Dir = 2,
 }
 
 // the file system
 pub struct FileSystem {
     pub device: Arc<dyn BlockDevice>,
-    pub superblock: Option<SuperBlock>,
-    pub bitmap: Option<Bitmap>,
-    pub inode: Option<Vec<Inode>>,
+    pub sb: Option<Arc<RwLock<BufferBlock>>>,
+    pub lh: Option<Arc<RwLock<BufferBlock>>>,
+    pub bitmap: Option<Arc<RwLock<BufferBlock>>>,
 }
 
 impl FileSystem {
     pub fn new(device: Arc<dyn BlockDevice>) -> Self {
         let mut fs = Self {
             device: device,
-            superblock: None,
+            sb: None,
+            lh: None,
             bitmap: None,
-            inode: None,
         };
         fs.init();
         fs
     }
 
     fn init(&mut self) {
-        // init super block
-        self.superblock.unwrap().init(self.device.clone());
-        let sb = &self.superblock.unwrap();
-
-        // init inodes
-        let mut inodes = Vec::new();
-        for i in 0..sb.ninodes {
-            let mut buf = [0u8; BLOCK_SIZE as usize];
-            self.device.read_block(sb.inodestart + i / 8, &mut buf);
-            let inode: &Inode = unsafe { std::mem::transmute(&buf) };
-            inodes.push(inode);
+        unsafe {
+            SB.init(self.device.clone());
         }
+        self.sb = Some(get_buffer_block(SB_BLOCK, self.device.clone()));
+        unsafe { LOG_MANAGER.init(&SB, self.device.clone()) };
+        self.lh = Some(get_buffer_block(
+            unsafe { SB.logstart },
+            self.device.clone(),
+        ));
+        self.bitmap = Some(get_buffer_block(
+            unsafe { SB.bmapstart },
+            self.device.clone(),
+        ));
     }
 }
 
@@ -95,4 +91,7 @@ mod test {
         let filetype = FileType::None;
         assert_eq!(filetype as u32, 0);
     }
+
+    #[test]
+    fn test_init() {}
 }

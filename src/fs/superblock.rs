@@ -1,20 +1,21 @@
 use std::sync::Arc;
 
-use serde::{Serialize, Deserialize};
-use super::fs::{FATPIGEORZMAGIC, BlockDevice, BLOCK_SIZE, SB_BLOCK};
+use super::buffer::get_buffer_block;
+use super::fs::{BlockDevice, BLOCK_SIZE, FATPIGEORZMAGIC, SB_BLOCK};
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 
 // the super block of filesystem
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SuperBlock {
-    magic: u32,                     // Must be FSMAGIC
-    pub size: u32,                  // Size of file system image (blocks)
-    pub nblocks: u32,               // Number of data blocks
-    pub ninodes: u32,               // Number of inodes
-    pub nlog: u32,                  // Number of log blocks
-    pub logstart: u32,              // Block number of first log block
-    pub inodestart: u32,            // Block number of first inode block
-    pub bmapstart: u32,             // Block number of first free map block
+    magic: u32,          // Must be FSMAGIC
+    pub size: u32,       // Size of file system image (blocks)
+    pub nblocks: u32,    // Number of data blocks
+    pub ninodes: u32,    // Number of inodes
+    pub nlog: u32,       // Number of log blocks
+    pub logstart: u32,   // Block number of first log block
+    pub inodestart: u32, // Block number of first inode block
+    pub bmapstart: u32,  // Block number of first free map block
 }
 
 impl SuperBlock {
@@ -31,12 +32,62 @@ impl SuperBlock {
         }
     }
 
-    // Read and init the super block from disk into memory.
-    // SAFETY: it should only be called by the first regular process alone.
     pub fn init(&mut self, dev: Arc<dyn BlockDevice>) {
-        let mut buf = [0u8; BLOCK_SIZE as usize];
-        dev.read_block(SB_BLOCK, &mut buf);
-        let sb: &SuperBlock = unsafe { std::mem::transmute(&buf) };
-        *self = *sb;
+        let sb_block = get_buffer_block(SB_BLOCK, dev.clone());
+        let sb_guard = sb_block.read().unwrap();
+        let sb_buffer = &*(sb_guard.as_ref::<[u8; BLOCK_SIZE as usize]>(0));
+        let sb: SuperBlock = bincode::deserialize(sb_buffer).unwrap();
+        // assert magic eq and panic
+        if self.magic != FATPIGEORZMAGIC {
+            panic!("SuperBlock::init: invalid magic number");
+        }
+        self.size = sb.size;
+        self.nblocks = sb.nblocks;
+        self.ninodes = sb.ninodes;
+        self.nlog = sb.nlog;
+        self.logstart = sb.logstart;
+        self.inodestart = sb.inodestart;
+        self.bmapstart = sb.bmapstart;
+    }
+}
+
+pub static mut SB: Lazy<SuperBlock> = Lazy::new(|| SuperBlock::new());
+
+#[cfg(test)]
+mod test {
+    use std::fs::{File, OpenOptions};
+
+    use crate::fs::filedisk::FileDisk;
+
+    use super::super::fs::*;
+    use super::*;
+    #[test]
+    fn test_init() {
+        let file: File = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create(false)
+            .open("./test.img")
+            .unwrap();
+        let dev = Arc::new(FileDisk::new(file));
+        unsafe {
+            SB.init(dev.clone());
+        }
+        // boot block: 0
+        // super block: 1
+        // log header: 2
+        // log: 3 - 50
+        // inode blocks: 51 - 178
+        // free bit map: 179 - 179
+        // data blocks: 180 - 2047
+
+        assert_eq!(unsafe { SB.size }, 2048);
+        assert_eq!(unsafe { SB.nblocks }, 2048 - 180);
+        assert_eq!(unsafe { SB.ninodes }, NINODES);
+        assert_eq!(unsafe { SB.nlog }, LOGSIZE);
+        assert_eq!(unsafe { SB.logstart }, 2);
+        assert_eq!(unsafe { SB.inodestart }, 51);
+        assert_eq!(unsafe { SB.bmapstart }, 179);
+        print!("superblock: {:?}\n", unsafe { *SB });
     }
 }
