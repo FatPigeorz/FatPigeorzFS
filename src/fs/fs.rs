@@ -17,7 +17,7 @@ pub const BPB: u32 = BLOCK_SIZE * 8;
 pub const FATPIGEORZMAGIC: u32 = 0x14451100;
 pub const ROOTINO: u32 = 1;
 pub const NDIRECT: u32 = 11;
-pub const NAMESIZE: u32 = 14;
+pub const NAMESIZE: u32 = 10;
 pub const NINDIRECT: u32 = BLOCK_SIZE / std::mem::size_of::<u32>() as u32;
 pub const MAXFILE: u32 = NDIRECT + NINDIRECT + NINDIRECT * NINDIRECT;
 

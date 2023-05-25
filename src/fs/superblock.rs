@@ -3,10 +3,9 @@ use std::sync::Arc;
 use super::buffer::get_buffer_block;
 use super::fs::{BlockDevice, BLOCK_SIZE, FATPIGEORZMAGIC, SB_BLOCK};
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
 
 // the super block of filesystem
-#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct SuperBlock {
     magic: u32,          // Must be FSMAGIC
     pub size: u32,       // Size of file system image (blocks)
@@ -35,8 +34,7 @@ impl SuperBlock {
     pub fn init(&mut self, dev: Arc<dyn BlockDevice>) {
         let sb_block = get_buffer_block(SB_BLOCK, dev.clone());
         let sb_guard = sb_block.read().unwrap();
-        let sb_buffer = &*(sb_guard.as_ref::<[u8; BLOCK_SIZE as usize]>(0));
-        let sb: SuperBlock = bincode::deserialize(sb_buffer).unwrap();
+        let sb: &SuperBlock = sb_guard.as_ref(0);
         // assert magic eq and panic
         if self.magic != FATPIGEORZMAGIC {
             panic!("SuperBlock::init: invalid magic number");

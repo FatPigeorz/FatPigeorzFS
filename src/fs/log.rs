@@ -1,5 +1,6 @@
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
 
+use log::info;
 use once_cell::sync::Lazy;
 
 use super::buffer::{get_buffer_block, BufferBlock};
@@ -8,8 +9,9 @@ use super::superblock::SuperBlock;
 
 // Contents of the log header block, used for both the on-disk header block
 // and to keep track in memory of logged block before commit.
+#[repr(C)]
 #[derive(Clone, Copy)]
-struct LogHeader {
+pub struct LogHeader {
     n: u32,                               // log len
     block: [u32; (LOGSIZE - 1) as usize], // block to write to
 }
@@ -196,6 +198,7 @@ impl LogManager {
 pub static mut LOG_MANAGER: Lazy<LogManager> = Lazy::new(|| LogManager::new());
 
 pub fn log_write(buffer: &RwLockWriteGuard<BufferBlock>) {
+    info!("log_write: {}", buffer.id());
     unsafe {
         LOG_MANAGER.write(buffer);
     }

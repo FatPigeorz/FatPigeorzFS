@@ -1,6 +1,7 @@
 use crate::fs::file::*;
 use crate::fs::fs::*;
 use crate::fs::inode::*;
+use crate::fs::log::*;
 use crate::fs::superblock::*;
 use env_logger::{Builder, Target};
 use log::info;
@@ -68,6 +69,14 @@ pub fn mkfs(path: PathBuf, size: u32) {
         fs_size, nbitmap, ninodeblocks, nlog, nmeta
     );
 
+    // list  size
+    info!("disk datastructure size:");
+    info!("SuperBlock: {}", std::mem::size_of::<SuperBlock>());
+    info!("LogHeader: {}", std::mem::size_of::<LogHeader>());
+    info!("Dinode: {}", std::mem::size_of::<Dinode>());
+    info!("DirEntry: {}", std::mem::size_of::<DirEntry>());
+    info!("File: {}", std::mem::size_of::<File>());
+
     // list the disk layout
     info!("Disk layout:");
     info!("boot block: 0");
@@ -92,8 +101,13 @@ pub fn mkfs(path: PathBuf, size: u32) {
 
     // serialize sb
     let mut buf = [0; 512];
-    let sb_bytes = bincode::serialize(&sb).unwrap();
-    buf[..sb_bytes.len()].copy_from_slice(&sb_bytes);
+    unsafe {
+        std::ptr::copy(
+            &sb as *const SuperBlock as *const u8,
+            buf.as_mut_ptr(),
+            std::mem::size_of::<SuperBlock>(),
+        );
+    }
     info!("write superblock at block {}", 1);
     write_block(&mut file, SB_BLOCK, &buf);
 
@@ -107,20 +121,19 @@ pub fn mkfs(path: PathBuf, size: u32) {
 
     let mut de = DirEntry::default();
     de.inum = rootino;
-    de.name = ".".to_string();
-    let data = bincode::serialize(&de).unwrap();
-    let mut buf = [0; std::mem::size_of::<DirEntry>()];
-    buf[..data.len()].copy_from_slice(&data);
+    // de.name = ".".to_string();
+    nameassign(&mut de.name, &".".to_string());
+    let buf = unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };
     iappend(&mut file, rootino, &sb, &buf, &mut freeblock);
 
-    de.name = "..".to_string();
-    let data = bincode::serialize(&de).unwrap();
-    buf[..data.len()].copy_from_slice(&data);
+    let mut de = DirEntry::default();
+    nameassign(&mut de.name, &"..".to_string());
+    let buf = unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };
     iappend(&mut file, rootino, &sb, &buf, &mut freeblock);
 
     // fix size of root
     let mut dinode = rinode(&mut file, &sb, rootino);
-    dinode.size = 3 * std::mem::size_of::<DirEntry>() as u32;
+    dinode.size = BLOCK_SIZE;
     winode(&mut file, &sb, rootino, dinode);
 
     balloc(&mut file, &sb, freeblock);
@@ -151,7 +164,6 @@ fn ialloc(file: &mut File, sb: &SuperBlock, filetype: FileType, freeinode: &mut 
 }
 
 // append data to inode
-// TODO support double indirect file
 fn iappend(file: &mut File, inum: u32, sb: &SuperBlock, data: &[u8], freeblock: &mut u32) {
     let mut dinode = rinode(file, sb, inum);
     let mut indirect = [0u32; NINDIRECT as usize];
@@ -234,18 +246,19 @@ fn rinode(file: &mut File, sb: &SuperBlock, inum: u32) -> Dinode {
         block_of_inode(inum, sb)
     );
     read_block(file, block_of_inode(inum, sb), &mut buf);
-    bincode::deserialize(
-        &buf[inum as usize * std::mem::size_of::<Dinode>()
-            ..(inum + 1) as usize * std::mem::size_of::<Dinode>()],
-    )
-    .unwrap()
+    // use transmute instead
+    unsafe {
+        let ptr = buf.as_ptr() as *const Dinode;
+        return *ptr.add(inum as usize % IPB as usize);
+    }
 }
 
 fn winode(file: &mut File, sb: &SuperBlock, inum: u32, dinode: Dinode) {
     let mut buf = [0; BLOCK_SIZE as usize];
-    let dinode_bytes = bincode::serialize(&dinode).unwrap();
-    buf[dinode_bytes.len() * inum as usize..dinode_bytes.len() * (inum + 1) as usize]
-        .copy_from_slice(&dinode_bytes);
+    unsafe {
+        let ptr = buf.as_mut_ptr() as *mut Dinode;
+        ptr.add(inum as usize % IPB as usize).write(dinode);
+    }
     info!(
         "winode: write inode block at block {}",
         block_of_inode(inum, sb)
@@ -293,63 +306,6 @@ mod test {
         assert_eq!(indirect[0], 1);
         assert_eq!(indirect[1], 2);
         assert_eq!(indirect[2], 3);
-    }
-
-    #[test]
-    fn test_sb_serialize() {
-        // make file
-        let mut file: File = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open("./test.img")
-            .unwrap();
-        file.set_len(1024 * 1024).unwrap();
-        file.write_all(&[0u8; 1024 * 1024]).unwrap();
-
-        let sb = super::SuperBlock::new();
-        // serialize
-        // write sb to block 0
-        let mut buf = [0; 512];
-        let sb_bytes = bincode::serialize(&sb).unwrap();
-        buf[..sb_bytes.len()].copy_from_slice(&sb_bytes);
-        write_block(&mut file, 1, &buf);
-
-        // deserialize
-        read_block(&mut file, 1, &mut buf);
-        let new_sb: super::SuperBlock = bincode::deserialize(&buf).unwrap();
-        assert_eq!(sb, new_sb);
-    }
-
-    #[test]
-    fn test_dinode_serialize() {
-        // make file
-        let mut file: File = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open("./test.img")
-            .unwrap();
-        file.set_len(1024 * 1024).unwrap();
-        file.write_all(&[0u8; 1024 * 1024]).unwrap();
-
-        let mut dinode = super::Dinode::default();
-        // root inode
-        dinode.ftype = FileType::Dir as u16;
-        dinode.nlink = 1;
-        dinode.size = 0;
-        dinode.blocks[0] = 1;
-        // serialize
-        // write sb to block 0
-        let mut buf = [0; 512];
-        let dinode_bytes = bincode::serialize(&dinode).unwrap();
-        buf[..dinode_bytes.len()].copy_from_slice(&dinode_bytes);
-        write_block(&mut file, 1, &buf);
-
-        // deserialize
-        read_block(&mut file, 1, &mut buf);
-        let new_dinode: super::Dinode = bincode::deserialize(&buf).unwrap();
-        assert_eq!(dinode, new_dinode);
     }
 
     #[test]
