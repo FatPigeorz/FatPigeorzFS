@@ -18,7 +18,7 @@ pub const SHARD_NUM: u32 = 4;
 // Maxinum of blocks an FS op can write
 pub const MAXOPBLOCKS: u32 = 16;
 // Size of log buffer + log header
-pub const LOGSIZE: u32 = MAXOPBLOCKS * 3 + 1;
+pub const LOGSIZE: u32 = MAXOPBLOCKS * 4 + 1;
 
 pub const NINODES: u32 = 1024;
 // Inodes per block.

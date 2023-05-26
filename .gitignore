@@ -4,3 +4,6 @@
 
 *.img
 Cargo.lock
+mkfs.log
+bigfile.jpg
+ReadMe.txt

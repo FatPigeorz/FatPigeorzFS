@@ -1,9 +1,9 @@
 mod fs;
 mod mkfs;
+mod shell;
 
 use clap::{Parser, Subcommand};
 use env_logger::Builder;
-use fuser::{Filesystem, MountOption};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -42,10 +42,9 @@ fn main() {
             // just print and raise not implementd
             println!("mkfs: path: {:?}, size: {}", path, size);
             mkfs::mkfs(path, size);
-        },
+        }
         Commands::Shell { path } => (),
     }
-    
 
     // let log_level = match cli.verbosity {
     //     0 => LevelFilter::Error,

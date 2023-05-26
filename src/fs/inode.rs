@@ -7,8 +7,9 @@ use std::{
 };
 
 use super::buffer::BufferBlock;
-use super::file::FileType;
+use super::file::{FileType, Stat};
 use super::fs::{MAXFILE, NAMESIZE};
+use super::log::begin_op;
 use super::{
     buffer::get_buffer_block,
     fs::{BlockDevice, BLOCK_SIZE, BPB, IPB, NDIRECT, NINDIRECT, NINODES, ROOTINO},
@@ -17,19 +18,21 @@ use super::{
 };
 
 pub struct InodeData {
-    valid: bool,                         // Valid?
-    ftype: FileType,                     // FileType
-    nlink: u16,                          // Number of links to file
-    size: u32,                           // Size of file (bytes)
-    blocks: [u32; NDIRECT as usize + 2], // Pointers to blocks
+    pub valid: bool,                         // Valid?
+    pub ftype: FileType,                     // FileType
+    pub nlink: u16,                          // Number of links to file
+    pub size: u32,                           // Size of file (bytes)
+    pub blocks: [u32; NDIRECT as usize + 2], // Pointers to blocks
 }
 
 // INode in memory
 pub struct Inode {
-    dev: Arc<dyn BlockDevice>,   // Device
-    inum: u32,                   // Inode number
-    data: Arc<Mutex<InodeData>>, // Inode content
+    pub dev: Arc<dyn BlockDevice>,   // Device
+    pub inum: u32,                   // Inode number
+    pub data: Arc<Mutex<InodeData>>, // Inode content
 }
+
+unsafe impl Send for Inode {}
 
 pub struct ICache {
     inodes: Arc<Mutex<Vec<Option<Arc<Inode>>>>>,
@@ -43,7 +46,9 @@ fn block_of_bitmap(b: u32) -> u32 {
     (b / BPB) + unsafe { SB.bmapstart }
 }
 
-fn bzero(bp: &mut RwLockWriteGuard<BufferBlock>) {
+fn bzero(blockno: u32, dev: Arc<dyn BlockDevice>) {
+    let block = get_buffer_block(blockno, dev.clone());
+    let mut bp = block.write().unwrap();
     let buf = bp.as_mut::<[u8; BLOCK_SIZE as usize]>(0);
     buf.fill(0);
 }
@@ -60,10 +65,11 @@ fn balloc(dev: Arc<dyn BlockDevice>) -> u32 {
             if buf[(bi / 8) as usize] & mask == 0 {
                 buf[(bi / 8) as usize] |= mask;
                 find = bi + 1;
+                break;
             }
         }
         if find > 0 {
-            bzero(&mut bp);
+            bzero(b + find - 1, dev.clone());
             log_write(&bp);
             return b + find - 1;
         }
@@ -133,10 +139,10 @@ pub fn bmap(
         let block = get_buffer_block(buf[block as usize], dev.clone());
         let mut bp = block.write().unwrap();
         let buf = bp.as_mut::<[u32; NINDIRECT as usize]>(0);
-        if buf[bn as usize] == 0 {
-            buf[bn as usize] = balloc(dev.clone());
+        if buf[bn as usize % NINDIRECT as usize] == 0 {
+            buf[bn as usize % NINDIRECT as usize] = balloc(dev.clone());
         }
-        return Ok(buf[bn as usize]);
+        return Ok(buf[bn as usize % NINDIRECT as usize]);
     }
     Err("bmap: out of range".to_string())
 }
@@ -160,7 +166,7 @@ impl ICache {
         for i in 1..NINODES {
             let block = get_buffer_block(block_of_inode(i), dev.clone());
             let mut bp = block.write().unwrap();
-            let dinode: &mut Dinode = bp.as_mut(i as usize * std::mem::size_of::<Dinode>());
+            let dinode: &mut Dinode = bp.as_mut(i as usize % IPB as usize * std::mem::size_of::<Dinode>());
             if dinode.ftype == 0 {
                 info!("ialloc: alloc inode {}", i);
                 dinode.ftype = ftype as u16;
@@ -321,7 +327,7 @@ impl ICache {
         dst: &mut [u8],
         off: usize,
         len: usize,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         if off > inode.size as usize {
             return Err("readi: off/len out of range".to_string());
         }
@@ -345,7 +351,7 @@ impl ICache {
             );
             start += copy_bytes;
         }
-        Ok(())
+        Ok(std::cmp::min(len, inode.size as usize - off))
     }
 
     fn writei(
@@ -373,7 +379,7 @@ impl ICache {
                 off + len - start,
             );
             let buf = bp.as_mut::<[u8; BLOCK_SIZE as usize]>(0);
-            buf[start..start + copy_bytes]
+            buf[start % BLOCK_SIZE as usize..start % BLOCK_SIZE as usize + copy_bytes]
                 .copy_from_slice(&src[start - off..start - off + copy_bytes]);
             start += copy_bytes;
             log_write(&bp);
@@ -457,9 +463,12 @@ impl ICache {
         if p.next().unwrap() != "/" {
             panic!("namex: path should start with /");
         }
-
-        let last = path.file_name().unwrap();
         let mut ip = self.iget(dev.clone(), ROOTINO).unwrap();
+        // if path is "/", return root
+        if path.components().count() == 1 {
+            return Some(ip);
+        }
+        let last = path.file_name().unwrap();
         while let Some(name) = p.next() {
             let mut guard = ip.data.lock().unwrap();
             self.ilock(&mut guard, ip.inum, dev.clone());
@@ -580,13 +589,25 @@ impl ICache {
 
 pub static mut ICACHE: Lazy<ICache> = Lazy::new(|| ICache::new());
 
+pub fn create(
+    dev: Arc<dyn BlockDevice>,
+    path: PathBuf,
+    ftype: FileType,
+) -> Result<Arc<Inode>, String> {
+    unsafe { ICACHE.create(dev, path, ftype) }
+}
+
+pub fn namei(dev: Arc<dyn BlockDevice>, path: PathBuf) -> Option<Arc<Inode>> {
+    unsafe { ICACHE.namei(dev, path) }
+}
+
 pub fn readi(
     dev: Arc<dyn BlockDevice>,
     inode: &mut MutexGuard<InodeData>,
     dst: &mut [u8],
     off: usize,
     n: usize,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     unsafe { ICACHE.readi(dev, inode, dst, off, n) }
 }
 
@@ -615,6 +636,12 @@ pub fn iput(inode: Arc<Inode>) {
 pub fn iget(dev: Arc<dyn BlockDevice>, inum: u32) -> Option<Arc<Inode>> {
     info!("iget: inum: {:?}", inum);
     unsafe { ICACHE.iget(dev, inum) }
+}
+
+pub fn ilock(inode: &mut MutexGuard<InodeData>, inum: u32, dev: Arc<dyn BlockDevice>) {
+    unsafe {
+        ICACHE.ilock(inode, inum, dev);
+    }
 }
 
 // Disk Struct
@@ -648,7 +675,7 @@ pub fn namecmp(s: &[u8], t: &String) -> bool {
         }
         i += 1;
     }
-    return i == s.len();
+    return true;
 }
 
 pub fn nameassign(s: &mut [u8], t: &String) {
