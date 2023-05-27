@@ -237,7 +237,7 @@ fn iappend(file: &mut File, inum: u32, sb: &SuperBlock, data: &[u8], freeblock: 
 }
 
 fn block_of_inode(inum: u32, sb: &SuperBlock) -> u32 {
-    sb.inodestart + (inum - 1) / IPB
+    sb.inodestart + inum / IPB
 }
 
 fn rinode(file: &mut File, sb: &SuperBlock, inum: u32) -> DiskInode {

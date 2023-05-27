@@ -1,4 +1,13 @@
-use super::fs::{NAMESIZE, NDIRECT};
+use std::sync::Arc;
+
+use crate::fs::fs::BLOCK_SIZE;
+
+use super::log::log_write;
+use super::{
+    buffer::get_buffer_block,
+    fs::{BlockDevice, BPB, IPB, NAMESIZE, NDIRECT},
+    superblock::SB,
+};
 
 // Disk Struct
 #[repr(C)]
@@ -48,7 +57,52 @@ pub fn nameassign(s: &mut [u8], t: &String) {
     }
 }
 
-// In Memory Stuff
+// get the (block,offset) of inum
+fn addr_of_inode(inum: u32) -> (u32, u32) {
+    (inum / IPB + unsafe { SB.inodestart }, inum % IPB)
+}
+
+// get the block containing the bitmap
+fn block_of_bitmap(block: u32) -> u32 {
+    block / BPB + unsafe { SB.bmapstart }
+}
+
+pub struct Inode {
+    pub dev: Arc<dyn BlockDevice>,
+    pub inum: u32,
+    pub valid: bool,
+    pub disk_inode: DiskInode,
+}
+
+impl Inode {
+    pub fn new(dev: Arc<dyn BlockDevice>, inum: u32) -> Self {
+        Self {
+            dev,
+            inum,
+            valid: false,
+            disk_inode: DiskInode::default(),
+        }
+    }
+}
+
+impl Inode {
+    fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
+        let (blk, off) = addr_of_inode(self.inum);
+        get_buffer_block(blk, self.dev.clone())
+            .read()
+            .unwrap()
+            .read(off as usize, f)
+    }
+
+    fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
+        let (blk, off) = addr_of_inode(self.inum);
+        log_write(
+            &mut get_buffer_block(blk, self.dev.clone()).write().unwrap(),
+            off as usize,
+            f,
+        )
+    }
+}
 
 #[cfg(test)]
 mod test {}
