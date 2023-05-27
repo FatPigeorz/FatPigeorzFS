@@ -30,7 +30,7 @@ pub fn namecmp(s: &[u8], t: &String) -> bool {
         }
         i += 1;
     }
-    return true;
+    true
 }
 
 pub fn nameassign(s: &mut [u8], t: &String) {
@@ -49,7 +49,6 @@ pub fn nameassign(s: &mut [u8], t: &String) {
 }
 
 // In Memory Stuff
-
 
 #[cfg(test)]
 mod test {}

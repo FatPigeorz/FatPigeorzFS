@@ -30,6 +30,13 @@ pub const IPB: u32 = BLOCK_SIZE / (std::mem::size_of::<DiskInode>() as u32);
 pub const NFILE: u32 = 100;
 pub const NOFILE: u32 = 16;
 
+#[derive(Copy, Clone, PartialEq)]
+pub enum FileType {
+    NULL = 0,
+    File = 1,
+    Dir = 2,
+}
+
 pub trait BlockDevice: Send + Sync {
     fn read_block(&self, block_id: u32, buf: &mut [u8]);
     fn write_block(&self, block_id: u32, buf: &[u8]);
