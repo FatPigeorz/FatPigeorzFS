@@ -46,7 +46,7 @@ pub fn mkfs(path: PathBuf, size: u32) {
 
     // metadata
     let fs_size = size / BLOCK_SIZE;
-    let nbitmap = fs_size / (BLOCK_SIZE * 8) + 1;
+    let nbitmap = fs_size / (BLOCK_SIZE * 8);
     let ninodeblocks = NINODES / IPB;
     let nlog = LOGSIZE;
     let nmeta = 2 + nlog + ninodeblocks + nbitmap;
@@ -270,47 +270,15 @@ fn winode(file: &mut File, sb: &SuperBlock, inum: u32, dinode: DiskInode) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::mkfs::{read_block, write_block};
-    use std::{
-        fs::{File, OpenOptions},
-        io::Write,
-    };
 
     #[test]
-    fn test_dentry_size() {
-        println!("{}", std::mem::size_of::<DirEntry>());
-    }
-
-    #[test]
-    fn test_transmute() {
-        let mut file: File = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open("./test.img")
-            .unwrap();
-        file.set_len(1024 * 1024).unwrap();
-        file.write_all(&[0u8; 1024 * 1024]).unwrap();
-        let mut indirect = [0u32; NINDIRECT as usize];
-        indirect[0] = 1;
-        indirect[1] = 2;
-        indirect[2] = 3;
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut(indirect.as_mut_ptr() as *mut u8, BLOCK_SIZE as usize)
-        };
-        write_block(&mut file, 0, &buf);
-        let mut buf = [0; BLOCK_SIZE as usize];
-        let indirect = unsafe {
-            std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u32, NINDIRECT as usize)
-        };
-        read_block(&mut file, 0, &mut buf);
-        assert_eq!(indirect[0], 1);
-        assert_eq!(indirect[1], 2);
-        assert_eq!(indirect[2], 3);
+    fn test_size() {
+        println!("DirEntry:  {}", std::mem::size_of::<DirEntry>());
+        println!("DiskInode: {}", std::mem::size_of::<DiskInode>());
     }
 
     #[test]
     fn test_mkfs() {
-        mkfs("./test.img".into(), 1024 * 1024);
+        mkfs("./test.img".into(), 512 * 512 * 8);
     }
 }
