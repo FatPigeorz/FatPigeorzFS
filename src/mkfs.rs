@@ -73,7 +73,7 @@ pub fn mkfs(path: PathBuf, size: u32) {
     info!("disk datastructure size:");
     info!("SuperBlock: {}", std::mem::size_of::<SuperBlock>());
     info!("LogHeader: {}", std::mem::size_of::<LogHeader>());
-    info!("Dinode: {}", std::mem::size_of::<Dinode>());
+    info!("Dinode: {}", std::mem::size_of::<DiskInode>());
     info!("DirEntry: {}", std::mem::size_of::<DirEntry>());
     info!("File: {}", std::mem::size_of::<File>());
 
@@ -155,7 +155,7 @@ fn ialloc(file: &mut File, sb: &SuperBlock, filetype: FileType, freeinode: &mut 
     let inum = *freeinode;
     *freeinode += 1;
 
-    let mut dinode = Dinode::default();
+    let mut dinode = DiskInode::default();
     dinode.ftype = filetype as u16;
     dinode.nlink = 1;
     dinode.size = 0;
@@ -240,7 +240,7 @@ fn block_of_inode(inum: u32, sb: &SuperBlock) -> u32 {
     sb.inodestart + (inum - 1) / IPB
 }
 
-fn rinode(file: &mut File, sb: &SuperBlock, inum: u32) -> Dinode {
+fn rinode(file: &mut File, sb: &SuperBlock, inum: u32) -> DiskInode {
     let mut buf = [0; BLOCK_SIZE as usize];
     info!(
         "rinode: read inode block at block {}",
@@ -249,15 +249,15 @@ fn rinode(file: &mut File, sb: &SuperBlock, inum: u32) -> Dinode {
     read_block(file, block_of_inode(inum, sb), &mut buf);
     // use transmute instead
     unsafe {
-        let ptr = buf.as_ptr() as *const Dinode;
+        let ptr = buf.as_ptr() as *const DiskInode;
         return *ptr.add(inum as usize % IPB as usize);
     }
 }
 
-fn winode(file: &mut File, sb: &SuperBlock, inum: u32, dinode: Dinode) {
+fn winode(file: &mut File, sb: &SuperBlock, inum: u32, dinode: DiskInode) {
     let mut buf = [0; BLOCK_SIZE as usize];
     unsafe {
-        let ptr = buf.as_mut_ptr() as *mut Dinode;
+        let ptr = buf.as_mut_ptr() as *mut DiskInode;
         ptr.add(inum as usize % IPB as usize).write(dinode);
     }
     info!(

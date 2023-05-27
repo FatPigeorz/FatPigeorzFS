@@ -1,4 +1,4 @@
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
 
 use once_cell::sync::Lazy;
 
@@ -54,7 +54,7 @@ impl Log {
 
     fn read_head(&mut self) {
         let b = get_buffer_block(self.head, self.dev.as_ref().unwrap().clone());
-        let buffer_guard = b.read().unwrap().read(0, |lh: &LogHeader| {
+        b.read().unwrap().read(0, |lh: &LogHeader| {
             self.lh = *lh;
         });
     }

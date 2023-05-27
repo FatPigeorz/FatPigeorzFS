@@ -3,7 +3,7 @@ use super::fs::{NAMESIZE, NDIRECT};
 // Disk Struct
 #[repr(C)]
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
-pub struct Dinode {
+pub struct DiskInode {
     pub dev: u32,                            // Device number, always 0
     pub ftype: u16,                          // File type
     pub nlink: u16,                          // Number of links to file
@@ -48,7 +48,8 @@ pub fn nameassign(s: &mut [u8], t: &String) {
     }
 }
 
-// Memory Stuff
+// In Memory Stuff
+
 
 #[cfg(test)]
 mod test {}
