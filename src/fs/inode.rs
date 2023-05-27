@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use once_cell::sync::Lazy;
 
 use crate::fs::fs::BLOCK_SIZE;
 
+use super::fs::NINODES;
 use super::log::log_write;
 use super::{
     buffer::get_buffer_block,
-    fs::{BlockDevice, BPB, IPB, NAMESIZE, NDIRECT},
+    fs::{BlockDevice, FileType, BPB, IPB, NAMESIZE, NDIRECT},
     superblock::SB,
 };
 
@@ -23,6 +26,7 @@ pub struct DiskInode {
 // directory contains a sequence of entry
 #[repr(C)]
 #[derive(Debug, Default)]
+#[derive(Clone, Copy)]
 pub struct DirEntry {
     pub inum: u32,
     pub name: [u8; NAMESIZE as usize],
@@ -68,27 +72,31 @@ fn block_of_bitmap(block: u32) -> u32 {
 }
 
 pub struct Inode {
-    pub dev: Arc<dyn BlockDevice>,
+    pub dev: Option<Arc<dyn BlockDevice>>,
     pub inum: u32,
     pub valid: bool,
-    pub disk_inode: DiskInode,
 }
 
 impl Inode {
-    pub fn new(dev: Arc<dyn BlockDevice>, inum: u32) -> Self {
+    pub fn new() -> Self {
         Self {
-            dev,
-            inum,
+            dev: None,
+            inum: 0,
             valid: false,
-            disk_inode: DiskInode::default(),
         }
+    }
+
+    pub fn init(&mut self, dev: Arc<dyn BlockDevice>, inum: u32) {
+        self.dev = Some(dev);
+        self.inum = inum;
+        self.valid = false;
     }
 }
 
 impl Inode {
     fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         let (blk, off) = addr_of_inode(self.inum);
-        get_buffer_block(blk, self.dev.clone())
+        get_buffer_block(blk, self.dev.as_ref().unwrap().clone())
             .read()
             .unwrap()
             .read(off as usize, f)
@@ -97,12 +105,67 @@ impl Inode {
     fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         let (blk, off) = addr_of_inode(self.inum);
         log_write(
-            &mut get_buffer_block(blk, self.dev.clone()).write().unwrap(),
+            &mut get_buffer_block(blk, self.dev.as_ref().unwrap().clone())
+                .write()
+                .unwrap(),
             off as usize,
             f,
         )
     }
+
+    pub fn entry_list(&self) -> Option<Vec<DirEntry>> {
+        self.read_disk_inode(|diskinode| {
+            if diskinode.ftype != FileType::Dir as u16 {
+                return None;
+            } 
+            let mut entries = Vec::new();
+            for blk in diskinode.blocks.iter() {
+                if *blk == 0 {
+                    continue;
+                }
+                for i in (0..(BLOCK_SIZE as usize)).step_by(std::mem::size_of::<DirEntry>()) {
+                    let entry = get_buffer_block(*blk, self.dev.as_ref().unwrap().clone())
+                        .read()
+                        .unwrap()
+                        .read(
+                            i as usize,
+                            |entry: &DirEntry| *entry
+                        );
+                    if entry.inum == 0 {
+                        continue;
+                    }
+                    entries.push(entry);
+                }
+            }
+            Some(entries)
+        })
+    }
 }
+
+pub struct InodeTable (Vec<Arc<Mutex<Inode>>>);
+
+impl InodeTable {
+    pub fn new() -> Self {
+        let mut v = Vec::new();
+        for _ in 0..NINODES {
+            v.push(Arc::new(Mutex::new(Inode::new())));
+        }
+        Self(v)
+    }
+
+    pub fn get_inode(&self, dev: Arc<dyn BlockDevice>, inum: u32) -> Arc<Mutex<Inode>> {
+        let mut inode = self.0[inum as usize].lock().unwrap();
+        if inode.valid {
+            return self.0[inum as usize].clone();
+        }
+        inode.init(dev, inum);
+        inode.valid = true;
+        self.0[inum as usize].clone()
+    }
+}
+
+
+pub static mut INODETABLE: Lazy<InodeTable> = Lazy::new(|| InodeTable::new());
 
 #[cfg(test)]
 mod test {}
