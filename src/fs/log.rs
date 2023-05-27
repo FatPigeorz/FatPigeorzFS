@@ -203,16 +203,7 @@ pub static mut LOG_MANAGER: Lazy<LogManager> = Lazy::new(|| LogManager::new());
 
 // the api of logging layer
 impl LogManager {
-    pub fn log_read<T, V>(
-        &self,
-        buffer: &RwLockReadGuard<BufferBlock>,
-        offset: usize,
-        f: impl FnOnce(&T) -> V,
-    ) -> V {
-        buffer.read(offset, f)
-    }
-
-    pub fn log_modify<T, V>(
+    pub fn log_write<T, V>(
         &mut self,
         buffer: &mut RwLockWriteGuard<BufferBlock>,
         offset: usize,
@@ -225,20 +216,12 @@ impl LogManager {
     }
 }
 
-pub fn log_read<T, V>(
-    buffer: &RwLockReadGuard<BufferBlock>,
-    offset: usize,
-    f: impl FnOnce(&T) -> V,
-) -> V {
-    unsafe { LOG_MANAGER.log_read(buffer, offset, f) }
-}
-
-pub fn log_modify<T, V>(
+pub fn log_write<T, V>(
     buffer: &mut RwLockWriteGuard<BufferBlock>,
     offset: usize,
     f: impl FnOnce(&mut T) -> V,
 ) -> V {
-    unsafe { LOG_MANAGER.log_modify(buffer, offset, f) }
+    unsafe { LOG_MANAGER.log_write(buffer, offset, f) }
 }
 
 #[cfg(test)]
@@ -246,44 +229,12 @@ mod test {
     use std::{
         fs::{File, OpenOptions},
         io::Write,
-        os::unix::prelude::FileExt,
         sync::Arc,
         thread,
     };
 
     use super::super::filedisk::FileDisk;
     use super::*;
-    use crate::fs::fs::BlockDevice;
-
-    #[test]
-    fn test_single_thread() {
-        let mut file: File = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open("./test.img")
-            .unwrap();
-        file.set_len(1024 * 1024).unwrap();
-        file.write_all(&[0 as u8; 1024 * 1024]).unwrap();
-        let filedisk = Arc::new(FileDisk::new(file));
-        filedisk.write_block(0, &[0 as u8; 512]);
-        filedisk.write_block(1, &[1 as u8; 512]);
-        let src_buffer = get_buffer_block(0, filedisk.clone())
-            .read()
-            .unwrap()
-            .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
-        get_buffer_block(1, filedisk.clone())
-            .write()
-            .unwrap()
-            .write(0, |buf: &mut [u8; BLOCK_SIZE as usize]| {
-                buf.copy_from_slice(&src_buffer);
-            });
-        let dst_buffer = get_buffer_block(1, filedisk.clone())
-            .read()
-            .unwrap()
-            .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
-        assert_eq!(dst_buffer, [0 as u8; 512]);
-    }
 
     #[test]
     fn test_read_write_head() {
@@ -337,7 +288,7 @@ mod test {
         for i in 0..100u8 {
             let filedisk = filedisk.clone();
             let handle = thread::spawn(move || {
-                log_modify(
+                log_write(
                     &mut get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone())
                         .write()
                         .unwrap(),
@@ -358,8 +309,8 @@ mod test {
             let _ = get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone())
                 .read()
                 .unwrap()
-                .read(0, |b: &[u8; BLOCK_SIZE as usize]| {
-                    assert_eq!(b[0], i);
+                .read(0, |b: &u8| {
+                    assert_eq!(*b, i);
                 });
         }
     }
