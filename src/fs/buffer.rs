@@ -24,7 +24,7 @@ impl BufferBlock {
         }
     }
 
-    pub fn init_block(block_id: u32, block_device: Arc<dyn BlockDevice>) -> Self {
+    fn init_block(block_id: u32, block_device: Arc<dyn BlockDevice>) -> Self {
         let mut data = [0u8; BLOCK_SIZE as usize];
         block_device.read_block(block_id, &mut data);
         Self {
@@ -35,7 +35,7 @@ impl BufferBlock {
         }
     }
 
-    pub fn sync(&mut self) {
+    fn sync(&mut self) {
         // log sync
         if self.dirty {
             self.dirty = false;
@@ -50,7 +50,7 @@ impl BufferBlock {
         &self.data[offset] as *const u8 as usize
     }
 
-    pub fn as_ref<T>(&self, offset: usize) -> &T
+    fn as_ref<T>(&self, offset: usize) -> &T
     where
         T: Sized,
     {
@@ -60,7 +60,7 @@ impl BufferBlock {
         unsafe { &*(addr as *const T) }
     }
 
-    pub fn as_mut<T>(&mut self, offset: usize) -> &mut T
+    fn as_mut<T>(&mut self, offset: usize) -> &mut T
     where
         T: Sized,
     {
@@ -83,6 +83,12 @@ impl BufferBlock {
 
     pub fn write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
         f(self.as_mut(offset))
+    }
+
+    pub fn sync_write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
+        let ret = f(self.as_mut(offset));
+        self.sync();
+        ret
     }
 }
 
@@ -111,7 +117,7 @@ unsafe impl Send for LruHandle {}
 unsafe impl Sync for LruHandle {}
 
 impl LruHandle {
-    pub fn new() -> Self {
+    fn new() -> Self {
         // dummy head and dummy tail
         unsafe {
             let mut head = NonNull::new_unchecked(Box::leak(Box::new(Node {
@@ -135,7 +141,7 @@ impl LruHandle {
         }
     }
 
-    pub fn get(
+    fn get(
         &mut self,
         block_id: &u32,
         block_device: Arc<dyn BlockDevice>,
@@ -246,7 +252,7 @@ pub struct HandleTable {
 }
 
 impl HandleTable {
-    pub fn new(shard_num: u32, block_num: u32) -> Self {
+    fn new(shard_num: u32, block_num: u32) -> Self {
         assert_eq!(block_num % shard_num, 0);
         let mut handles = Vec::with_capacity(shard_num as usize);
         for _ in 0..shard_num {
@@ -266,7 +272,7 @@ impl HandleTable {
         Self { handles: handles }
     }
 
-    pub fn get(
+    fn get(
         &mut self,
         block_id: &u32,
         block_device: Arc<dyn BlockDevice>,

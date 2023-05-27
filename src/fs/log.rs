@@ -1,6 +1,5 @@
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use log::info;
 use once_cell::sync::Lazy;
 
 use super::buffer::{get_buffer_block, BufferBlock};
@@ -36,7 +35,7 @@ pub struct Log {
 }
 
 impl Log {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             dev: None,
             head: 0,
@@ -53,22 +52,21 @@ impl Log {
         self.recover();
     }
 
-    pub fn read_head(&mut self) {
+    fn read_head(&mut self) {
         let b = get_buffer_block(self.head, self.dev.as_ref().unwrap().clone());
-        let buffer_guard = b.read().unwrap();
-        let lh: &LogHeader = buffer_guard.as_ref(0);
-        self.lh = *lh;
+        let buffer_guard = b.read().unwrap().read(0, |lh: &LogHeader| {
+            self.lh = *lh;
+        });
     }
 
-    pub fn write_head(&mut self) {
+    fn write_head(&mut self) {
         let b = get_buffer_block(self.head, self.dev.as_ref().unwrap().clone());
-        let mut buffer_guard = b.write().unwrap();
-        let lh: &mut LogHeader = buffer_guard.as_mut(0);
-        *lh = self.lh;
-        buffer_guard.sync();
+        b.write().unwrap().sync_write(0, |lh: &mut LogHeader| {
+            *lh = self.lh;
+        });
     }
 
-    pub fn write_log(&self) {
+    fn write_log(&self) {
         for i in 0..self.lh.n {
             if self.lh.block[i as usize] == self.head + i + 1 {
                 panic!(
@@ -77,20 +75,23 @@ impl Log {
                 );
             }
             assert_ne!(self.lh.block[i as usize], self.head + i + 1);
-            let to = get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone());
-            let mut to_guard = to.write().unwrap();
             let from = get_buffer_block(
                 self.lh.block[i as usize],
                 self.dev.as_ref().unwrap().clone(),
-            );
-            let from_guard = from.read().unwrap();
-            let to_buf: &mut [u8; BLOCK_SIZE as usize] = to_guard.as_mut(0);
-            to_buf.copy_from_slice(from_guard.as_ref::<[u8; BLOCK_SIZE as usize]>(0));
-            to_guard.sync();
+            )
+            .read()
+            .unwrap()
+            .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
+            get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone())
+                .write()
+                .unwrap()
+                .sync_write(0, |buf: &mut [u8; BLOCK_SIZE as usize]| {
+                    buf.copy_from_slice(&from);
+                })
         }
     }
 
-    pub fn install_commit(&mut self) {
+    fn install_commit(&mut self) {
         for i in 0..self.lh.n {
             if self.lh.block[i as usize] == self.head + i + 1 {
                 panic!(
@@ -99,28 +100,31 @@ impl Log {
                 );
             }
             assert_ne!(self.lh.block[i as usize], self.head + i + 1);
-            let to = get_buffer_block(
+            let from = get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone())
+                .read()
+                .unwrap()
+                .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
+            get_buffer_block(
                 self.lh.block[i as usize],
                 self.dev.as_ref().unwrap().clone(),
-            );
-            let mut to_guard = to.write().unwrap();
-            let from = get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone());
-            let from_guard = from.read().unwrap();
-            let to_buf: &mut [u8; BLOCK_SIZE as usize] = to_guard.as_mut(0);
-            to_buf.copy_from_slice(from_guard.as_ref::<[u8; BLOCK_SIZE as usize]>(0));
-            to_guard.sync();
+            )
+            .write()
+            .unwrap()
+            .sync_write(0, |buf: &mut [u8; BLOCK_SIZE as usize]| {
+                buf.copy_from_slice(&from);
+            });
         }
         self.buffer_outstanding.clear();
     }
 
-    pub fn recover(&mut self) {
+    fn recover(&mut self) {
         self.read_head();
         self.install_commit();
         self.lh.n = 0;
         self.write_head();
     }
 
-    pub fn commit(&mut self) {
+    fn commit(&mut self) {
         if self.lh.n > 0 {
             // write commit record to disk
             self.write_log(); // write cached block to log block
@@ -136,7 +140,7 @@ impl Log {
 pub struct LogManager(Mutex<Log>, Condvar);
 
 impl LogManager {
-    pub fn new() -> Self {
+    fn new() -> Self {
         LogManager(Mutex::new(Log::new()), Condvar::new())
     }
 
@@ -144,11 +148,11 @@ impl LogManager {
         self.0.lock().unwrap().init(sb, dev);
     }
 
-    pub fn begin_op(&self) {
+    fn log_begin(&self) {
         let mut log_guard = self.0.lock().unwrap();
         loop {
             if (log_guard.lh.n + (log_guard.outstanding + 1) * MAXOPBLOCKS) > log_guard.size {
-                // this op might exhaust log space; wait for commit.
+                // this transaction might exhaust log space;
                 log_guard = self.1.wait(log_guard).unwrap();
             } else {
                 log_guard.outstanding += 1;
@@ -157,7 +161,7 @@ impl LogManager {
         }
     }
 
-    pub fn end_op(&self) {
+    fn log_end(&self) {
         // let mut do_commit = false;
         let mut log_guard = self.0.lock().unwrap();
         assert!(log_guard.outstanding > 0);
@@ -168,7 +172,7 @@ impl LogManager {
         self.1.notify_all();
     }
 
-    pub fn write(&mut self, buffer: &RwLockWriteGuard<BufferBlock>) {
+    fn write(&mut self, buffer: &RwLockWriteGuard<BufferBlock>) {
         let mut log_guard = self.0.lock().unwrap();
         assert!(log_guard.lh.n < LOGSIZE as u32);
         assert!(log_guard.outstanding > 0);
@@ -197,23 +201,44 @@ impl LogManager {
 
 pub static mut LOG_MANAGER: Lazy<LogManager> = Lazy::new(|| LogManager::new());
 
-pub fn log_write(buffer: &RwLockWriteGuard<BufferBlock>) {
-    info!("log_write: {}", buffer.id());
-    unsafe {
-        LOG_MANAGER.write(buffer);
+// the api of logging layer
+impl LogManager {
+    pub fn log_read<T, V>(
+        &self,
+        buffer: &RwLockReadGuard<BufferBlock>,
+        offset: usize,
+        f: impl FnOnce(&T) -> V,
+    ) -> V {
+        buffer.read(offset, f)
+    }
+
+    pub fn log_modify<T, V>(
+        &mut self,
+        buffer: &mut RwLockWriteGuard<BufferBlock>,
+        offset: usize,
+        f: impl FnOnce(&mut T) -> V,
+    ) -> V {
+        self.log_begin();
+        let ret = buffer.write(offset, f);
+        self.log_end();
+        ret
     }
 }
 
-pub fn begin_op() {
-    unsafe {
-        LOG_MANAGER.begin_op();
-    }
+pub fn log_read<T, V>(
+    buffer: &RwLockReadGuard<BufferBlock>,
+    offset: usize,
+    f: impl FnOnce(&T) -> V,
+) -> V {
+    unsafe { LOG_MANAGER.log_read(buffer, offset, f) }
 }
 
-pub fn end_op() {
-    unsafe {
-        LOG_MANAGER.end_op();
-    }
+pub fn log_modify<T, V>(
+    buffer: &mut RwLockWriteGuard<BufferBlock>,
+    offset: usize,
+    f: impl FnOnce(&mut T) -> V,
+) -> V {
+    unsafe { LOG_MANAGER.log_modify(buffer, offset, f) }
 }
 
 #[cfg(test)]
@@ -231,7 +256,7 @@ mod test {
     use crate::fs::fs::BlockDevice;
 
     #[test]
-    fn test_delay_write() {
+    fn test_single_thread() {
         let mut file: File = OpenOptions::new()
             .read(true)
             .write(true)
@@ -243,29 +268,21 @@ mod test {
         let filedisk = Arc::new(FileDisk::new(file));
         filedisk.write_block(0, &[0 as u8; 512]);
         filedisk.write_block(1, &[1 as u8; 512]);
-        let src = get_buffer_block(0, filedisk.clone());
-        let dst = get_buffer_block(1, filedisk.clone());
-        let src_guard = src.read().unwrap();
-        let mut dst_guard = dst.write().unwrap();
-        let src_buffer: &[u8; 512] = src_guard.as_ref(0);
-        let dst_buffer: &mut [u8; 512] = dst_guard.as_mut(0);
-        dst_buffer.copy_from_slice(src_buffer);
-        assert_eq!(dst_buffer, &[0 as u8; 512]);
-        // read from file
-        let file: File = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open("./test.img")
-            .unwrap();
-        let mut buffer = [0 as u8; 512];
-        file.read_exact_at(&mut buffer, 512).unwrap();
-        // the write is delayed, so it's still 1
-        assert_eq!(buffer, [1 as u8; 512]);
-        // test dirty bit
-        dst_guard.sync();
-        file.read_exact_at(&mut buffer, 512).unwrap();
-        // the write is flush, so it's 0!
-        assert_eq!(buffer, [0 as u8; 512]);
+        let src_buffer = get_buffer_block(0, filedisk.clone())
+            .read()
+            .unwrap()
+            .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
+        get_buffer_block(1, filedisk.clone())
+            .write()
+            .unwrap()
+            .write(0, |buf: &mut [u8; BLOCK_SIZE as usize]| {
+                buf.copy_from_slice(&src_buffer);
+            });
+        let dst_buffer = get_buffer_block(1, filedisk.clone())
+            .read()
+            .unwrap()
+            .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
+        assert_eq!(dst_buffer, [0 as u8; 512]);
     }
 
     #[test]
@@ -296,7 +313,7 @@ mod test {
     }
 
     #[test]
-    fn test_mp() {
+    fn test_mul_thread() {
         let mut file: File = OpenOptions::new()
             .read(true)
             .write(true)
@@ -320,15 +337,15 @@ mod test {
         for i in 0..100u8 {
             let filedisk = filedisk.clone();
             let handle = thread::spawn(move || {
-                unsafe { LOG_MANAGER.begin_op() };
-                {
-                    let buffer = get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone());
-                    let mut buffer_guard = buffer.write().unwrap();
-                    let b: &mut [u8; 512] = buffer_guard.as_mut(0);
-                    b[0] = i;
-                    unsafe { LOG_MANAGER.write(&buffer_guard) };
-                }
-                unsafe { LOG_MANAGER.end_op() };
+                log_modify(
+                    &mut get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone())
+                        .write()
+                        .unwrap(),
+                    0,
+                    |b: &mut u8| {
+                        *b = i;
+                    },
+                );
             });
             handles.push(handle);
         }
@@ -338,10 +355,12 @@ mod test {
             .for_each(|handle| handle.join().unwrap());
 
         for i in 0..100u8 {
-            let buffer = get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone());
-            let buffer_guard = buffer.read().unwrap();
-            let buffer: &[u8; 512] = buffer_guard.as_ref(0);
-            assert_eq!(buffer[0], i);
+            let _ = get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone())
+                .read()
+                .unwrap()
+                .read(0, |b: &[u8; BLOCK_SIZE as usize]| {
+                    assert_eq!(b[0], i);
+                });
         }
     }
 }

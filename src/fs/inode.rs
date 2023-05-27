@@ -1,4 +1,4 @@
-use super::fs::{NDIRECT, NAMESIZE};
+use super::fs::{NAMESIZE, NDIRECT};
 
 // Disk Struct
 #[repr(C)]
@@ -48,6 +48,7 @@ pub fn nameassign(s: &mut [u8], t: &String) {
     }
 }
 
+// Memory Stuff
+
 #[cfg(test)]
-mod test {
-}
+mod test {}

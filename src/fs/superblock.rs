@@ -33,20 +33,22 @@ impl SuperBlock {
     }
 
     pub fn init(&mut self, dev: Arc<dyn BlockDevice>) {
-        let sb_block = get_buffer_block(SB_BLOCK, dev.clone());
-        let sb_guard = sb_block.read().unwrap();
-        let sb: &SuperBlock = sb_guard.as_ref(0);
-        // assert magic eq and panic
-        if self.magic != FATPIGEORZMAGIC {
-            panic!("SuperBlock::init: invalid magic number");
-        }
-        self.size = sb.size;
-        self.nblocks = sb.nblocks;
-        self.ninodes = sb.ninodes;
-        self.nlog = sb.nlog;
-        self.logstart = sb.logstart;
-        self.inodestart = sb.inodestart;
-        self.bmapstart = sb.bmapstart;
+        let sb_block = get_buffer_block(SB_BLOCK, dev.clone())
+            .read()
+            .unwrap()
+            .read(0, |sb: &SuperBlock| {
+                // assert magic eq and panic
+                if self.magic != FATPIGEORZMAGIC {
+                    panic!("SuperBlock::init: invalid magic number");
+                }
+                self.size = sb.size;
+                self.nblocks = sb.nblocks;
+                self.ninodes = sb.ninodes;
+                self.nlog = sb.nlog;
+                self.logstart = sb.logstart;
+                self.inodestart = sb.inodestart;
+                self.bmapstart = sb.bmapstart;
+            });
     }
 }
 
