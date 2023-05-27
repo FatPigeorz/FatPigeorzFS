@@ -5,6 +5,7 @@ use super::fs::{BlockDevice, FATPIGEORZMAGIC, SB_BLOCK};
 use once_cell::sync::Lazy;
 
 // the super block of filesystem
+#[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct SuperBlock {
     magic: u32,          // Must be FSMAGIC

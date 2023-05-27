@@ -21,6 +21,8 @@ pub const MAXOPBLOCKS: u32 = 16;
 pub const LOGSIZE: u32 = MAXOPBLOCKS * 4 + 1;
 
 pub const NINODES: u32 = 1024;
+use std::sync::Arc;
+
 // Inodes per block.
 use super::inode::Dinode;
 pub const IPB: u32 = BLOCK_SIZE / (std::mem::size_of::<Dinode>() as u32);

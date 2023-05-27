@@ -1,6 +1,5 @@
 mod fs;
 mod mkfs;
-mod shell;
 
 use clap::{Parser, Subcommand};
 use env_logger::Builder;
@@ -35,6 +34,10 @@ enum Commands {
 }
 
 fn main() {
+    // init builder
+    let mut builder = Builder::new();
+    // set log level
+    builder.filter_level(log::LevelFilter::Info);
     let cli = CLI::parse();
     // match subcommands
     match cli.commands {
