@@ -212,11 +212,9 @@ impl InodePtr {
             *guard = Some(dinode);
         }
         let ret = f(guard.as_mut().unwrap());
-        self.0.modify_disk_inode(
-            |dinode| {
-                *dinode = *guard.as_ref().unwrap();
-            },
-        );
+        self.0.modify_disk_inode(|dinode| {
+            *dinode = *guard.as_ref().unwrap();
+        });
         ret
     }
 }
@@ -435,13 +433,11 @@ pub fn dirlink(dev: Arc<dyn BlockDevice>, dp: &mut InodePtr, name: &str, inum: u
     let mut de = DirEntry::default();
     let size = dp.0.read_disk_inode(|diskinode| diskinode.size as usize);
     let mut offset = 0;
-    for off in (0..size).step_by(std::mem::size_of::<DirEntry>())
-    {
+    for off in (0..size).step_by(std::mem::size_of::<DirEntry>()) {
         let mut buf = [0u8; std::mem::size_of::<DirEntry>()];
         rinode(dp, &mut buf, off, std::mem::size_of::<DirEntry>());
-        let entry = unsafe {
-            std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(buf)
-        };
+        let entry =
+            unsafe { std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(buf) };
         if entry.inum == 0 {
             de = entry;
             offset = off;
@@ -454,15 +450,48 @@ pub fn dirlink(dev: Arc<dyn BlockDevice>, dp: &mut InodePtr, name: &str, inum: u
     nameassign(&mut de.name, &name.to_string());
 
     let src = unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };
-    // writei
     winode(dp, &src, offset, src.len());
-    // sync
+}
+
+pub fn dirunlink(dev: Arc<dyn BlockDevice>, dp: &mut InodePtr, name: &str) {
+    let mut de = DirEntry::default();
+    let size = dp.0.read_disk_inode(|diskinode| diskinode.size as usize);
+    let mut offset = 0;
+    for off in (0..size).step_by(std::mem::size_of::<DirEntry>()) {
+        let mut buf = [0u8; std::mem::size_of::<DirEntry>()];
+        rinode(dp, &mut buf, off, std::mem::size_of::<DirEntry>());
+        let entry =
+            unsafe { std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(buf) };
+        if namecmp(&entry.name, &name.to_string()) {
+            de = entry;
+            offset = off;
+            break;
+        }
+        offset += std::mem::size_of::<DirEntry>();
+    }
+    if de.inum == 0 {
+        panic!("dirunlink: no entry");
+    }
+    de.inum = 0;
+    nameassign(&mut de.name, &"".to_string());
+    let src = unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };
+    winode(dp, &src, offset, src.len());
 }
 
 pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> Option<InodePtr> {
     let parent_dir = find_parent_inode(dev.clone(), path);
     let mut dp = parent_dir.unwrap();
     // alloc
+    let ip = find_child(
+        dev.clone(),
+        &mut dp,
+        path.file_name().unwrap().to_str().unwrap(),
+    );
+    if let Some(inode) = ip {
+        if inode.0.read_disk_inode(|diskinode| diskinode.ftype) == filetype as u16 {
+            return Some(inode);
+        }
+    }
     let mut ip = alloc_inode(dev.clone(), filetype);
     // init
     ip.modify_disk_inode(|diskinode| {
@@ -571,20 +600,19 @@ pub fn winode(ip: &mut InodePtr, src: &[u8], mut off: usize, mut n: usize) -> us
         let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
         buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]
             .copy_from_slice(&src[tot..tot + m]);
-        log_write(
-            &mut guard,
-            0,
-            |data: &mut [u8; BLOCK_SIZE as usize]| {
-                *data = buf;
-            },
-        );
+        log_write(&mut guard, 0, |data: &mut [u8; BLOCK_SIZE as usize]| {
+            *data = buf;
+        });
         tot += m;
         off += m;
     }
-    if off + n > ip.read_disk_inode(|diskinode| diskinode.size as usize) {
+    if off > ip.read_disk_inode(|diskinode| diskinode.size as usize) {
         ip.modify_disk_inode(|diskinode| {
-            diskinode.size = off as u32 + n as u32;
-            info!("winode: inode {} increase size {}", ip.0.inum, diskinode.size);
+            diskinode.size = off as u32;
+            info!(
+                "winode: inode {} increase size {}",
+                ip.0.inum, diskinode.size
+            );
         });
     }
     tot
@@ -620,7 +648,7 @@ mod test {
         superblock::SB,
     };
 
-    use super::{create, InodePtrManager, winode};
+    use super::{create, winode, InodePtrManager};
     #[test]
     fn test_get_inode() {
         let file: File = OpenOptions::new()
@@ -734,7 +762,7 @@ mod test {
         let mut buf = [0; 6];
         super::rinode(&mut testi, &mut buf, 0, 6);
         assert_eq!(buf, [1, 2, 3, 4, 5, 6]);
-        // test big file 
+        // test big file
         let mut buf = [1; 512 * 13];
         winode(&mut testi, &mut buf, 0, 512 * 13);
         let mut buf = [0; 512 * 13];
