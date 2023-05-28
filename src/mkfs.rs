@@ -181,17 +181,17 @@ fn iappend(file: &mut File, inum: u32, sb: &SuperBlock, data: &[u8], freeblock: 
         assert!(fbn < MAXFILE as u32);
         // read block
         if fbn < NDIRECT {
-            if dinode.blocks[fbn as usize] == 0 {
+            if dinode.addrs[fbn as usize] == 0 {
                 // allocate a new block
-                dinode.blocks[fbn as usize] = *freeblock;
+                dinode.addrs[fbn as usize] = *freeblock;
                 *freeblock += 1;
             }
-            dst_block = dinode.blocks[fbn as usize];
+            dst_block = dinode.addrs[fbn as usize];
         } else {
             // read the indirect block
-            if dinode.blocks[NDIRECT as usize] == 0 {
+            if dinode.addrs[NDIRECT as usize] == 0 {
                 // allocate the indirect inode
-                dinode.blocks[NDIRECT as usize] = *freeblock;
+                dinode.addrs[NDIRECT as usize] = *freeblock;
                 *freeblock += 1;
             }
             // read to indirect
@@ -202,7 +202,7 @@ fn iappend(file: &mut File, inum: u32, sb: &SuperBlock, data: &[u8], freeblock: 
                     BLOCK_SIZE as usize,
                 )
             };
-            read_block(file, dinode.blocks[NDIRECT as usize], &mut buf);
+            read_block(file, dinode.addrs[NDIRECT as usize], &mut buf);
             if indirect[fbn as usize - NDIRECT as usize] == 0 {
                 indirect[fbn as usize - NDIRECT as usize] = *freeblock;
                 *freeblock += 1;
@@ -213,7 +213,7 @@ fn iappend(file: &mut File, inum: u32, sb: &SuperBlock, data: &[u8], freeblock: 
                         BLOCK_SIZE as usize,
                     )
                 };
-                write_block(file, dinode.blocks[NDIRECT as usize], buf)
+                write_block(file, dinode.addrs[NDIRECT as usize], buf)
             }
             dst_block = indirect[fbn as usize - NDIRECT as usize];
         }

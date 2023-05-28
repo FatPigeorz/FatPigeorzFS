@@ -6,7 +6,7 @@ pub const BPB: u32 = BLOCK_SIZE * 8;
 
 pub const FATPIGEORZMAGIC: u32 = 0x14451100;
 pub const ROOTINO: u32 = 1;
-pub const NDIRECT: u32 = 11; // make full use of the 64 bytes of DiskInode
+pub const NDIRECT: u32 = 12; // make full use of the 64 bytes of DiskInode
 pub const NAMESIZE: u32 = 28;
 pub const NINDIRECT: u32 = BLOCK_SIZE / std::mem::size_of::<u32>() as u32;
 pub const MAXFILE: u32 = NDIRECT + NINDIRECT + NINDIRECT * NINDIRECT;
@@ -32,7 +32,7 @@ pub const NOFILE: u32 = 16;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum FileType {
-    NULL = 0,
+    Free = 0,
     File = 1,
     Dir = 2,
 }

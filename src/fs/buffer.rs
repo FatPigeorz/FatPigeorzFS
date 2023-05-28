@@ -82,10 +82,12 @@ impl BufferBlock {
     }
 
     pub fn write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
+        info!("write at block: {}, offset: {}", self.block_id, offset);
         f(self.as_mut(offset))
     }
 
     pub fn sync_write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
+        info!("sync write at block: {}, offset: {}", self.block_id, offset);
         let ret = f(self.as_mut(offset));
         self.sync();
         ret
@@ -288,6 +290,17 @@ impl HandleTable {
     }
 }
 
+pub fn sync_all() {
+    unsafe {
+        BUFFER_LAYER.handles.iter().for_each(|handle| {
+            handle.lock().unwrap().map.iter().for_each(|(_, node)| {
+                node.as_ref().data.write().unwrap().sync();
+            })
+        })
+    }
+}
+
+use log::info;
 use once_cell::sync::Lazy;
 static mut BUFFER_LAYER: Lazy<HandleTable> = Lazy::new(|| HandleTable::new(SHARD_NUM, BLOCK_NUM));
 
