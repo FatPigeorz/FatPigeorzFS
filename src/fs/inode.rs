@@ -79,7 +79,7 @@ fn block_of_bitmap(block: u32) -> u32 {
     block / BPB + unsafe { SB.bmapstart }
 }
 
-fn balloc(dev: Arc<dyn BlockDevice>) -> Option<u32> {
+fn block_alloc(dev: Arc<dyn BlockDevice>) -> Option<u32> {
     for b in (0..unsafe { SB.size }).step_by(BPB as usize) {
         let bno = block_of_bitmap(b);
         let blk = get_buffer_block(bno, dev.clone());
@@ -108,7 +108,7 @@ fn balloc(dev: Arc<dyn BlockDevice>) -> Option<u32> {
     None
 }
 
-fn bfree(dev: Arc<dyn BlockDevice>, b: u32) {
+fn block_free(dev: Arc<dyn BlockDevice>, b: u32) {
     let bno = block_of_bitmap(b);
     let bi = b % BPB;
     get_buffer_block(bno, dev.clone())
@@ -159,7 +159,7 @@ impl Inode {
         // free the data blocks
         for i in 0..NDIRECT {
             if dinode.addrs[i as usize] != 0 {
-                bfree(dev.clone(), dinode.addrs[i as usize]);
+                block_free(dev.clone(), dinode.addrs[i as usize]);
                 dinode.addrs[i as usize] = 0;
             }
         }
@@ -172,10 +172,10 @@ impl Inode {
                 .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
             for i in 0..NINDIRECT as usize {
                 if addrs[i] != 0 {
-                    bfree(dev.clone(), addrs[i as usize]);
+                    block_free(dev.clone(), addrs[i as usize]);
                 }
             }
-            bfree(dev.clone(), dinode.addrs[NDIRECT as usize]);
+            block_free(dev.clone(), dinode.addrs[NDIRECT as usize]);
             dinode.addrs[NDIRECT as usize] = 0;
         }
     }
@@ -361,7 +361,6 @@ pub fn find_child(dev: Arc<dyn BlockDevice>, ip: &mut InodePtr, name: &str) -> O
     None
 }
 
-// find inode, the path should be absolute path
 pub fn find_inode(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Option<InodePtr> {
     let mut inode = get_inode(dev.clone(), ROOTINO);
     if *path == PathBuf::from("/") {
@@ -515,11 +514,12 @@ pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> 
     Some(ip)
 }
 
-pub fn bmap(ip: &mut InodePtr, mut bn: u32) -> u32 {
+// get the bn'th block of inode
+pub fn block_map(ip: &mut InodePtr, mut bn: u32) -> u32 {
     let mut addr = None;
     if bn < NDIRECT {
         if ip.read_disk_inode(|diskinode| diskinode.addrs[bn as usize]) == 0 {
-            addr = balloc(ip.0.dev.as_ref().unwrap().clone());
+            addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
             ip.0.dinode.lock().unwrap().as_mut().unwrap().addrs[bn as usize] = addr.unwrap();
         } else {
             addr = Some(ip.read_disk_inode(|diskinode| diskinode.addrs[bn as usize]));
@@ -529,7 +529,7 @@ pub fn bmap(ip: &mut InodePtr, mut bn: u32) -> u32 {
     bn -= NDIRECT;
     if bn < NINDIRECT {
         if ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]) == 0 {
-            addr = balloc(ip.0.dev.as_ref().unwrap().clone());
+            addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
             ip.0.dinode.lock().unwrap().as_mut().unwrap().addrs[NDIRECT as usize] = addr.unwrap();
         }
         let mut addrs = get_buffer_block(
@@ -540,7 +540,7 @@ pub fn bmap(ip: &mut InodePtr, mut bn: u32) -> u32 {
         .unwrap()
         .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
         if addrs[bn as usize] == 0 {
-            addr = balloc(ip.0.dev.as_ref().unwrap().clone());
+            addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
             addrs[bn as usize] = addr.unwrap();
             log_write(
                 &mut get_buffer_block(
@@ -573,7 +573,7 @@ pub fn rinode(ip: &mut InodePtr, dst: &mut [u8], mut off: usize, mut n: usize) -
     let mut tot = 0;
     while tot < n {
         let bp = get_buffer_block(
-            bmap(ip, off as u32 / BLOCK_SIZE),
+            block_map(ip, off as u32 / BLOCK_SIZE),
             ip.0.dev.as_ref().unwrap().clone(),
         );
         let guard = bp.read().unwrap();
@@ -592,7 +592,7 @@ pub fn winode(ip: &mut InodePtr, src: &[u8], mut off: usize, mut n: usize) -> us
     let mut tot = 0;
     while tot < n {
         let bp = get_buffer_block(
-            bmap(ip, off as u32 / BLOCK_SIZE),
+            block_map(ip, off as u32 / BLOCK_SIZE),
             ip.0.dev.as_ref().unwrap().clone(),
         );
         let mut guard = bp.write().unwrap();
@@ -735,7 +735,7 @@ mod test {
             diskinode.nlink = 1;
             diskinode.size = 0;
         });
-        let addr = super::bmap(&mut inode, 0);
+        let addr = super::block_map(&mut inode, 0);
         assert_eq!(addr, 197);
     }
 

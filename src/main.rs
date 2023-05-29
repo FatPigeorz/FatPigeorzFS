@@ -3,7 +3,7 @@ mod mkfs;
 
 use clap::{Parser, Subcommand};
 use env_logger::{Builder, Target};
-use fs::{file::{OpenFile, fopen, fread, fwrite}, filedisk::FileDisk, superblock::SB, log::LOG_MANAGER, fs::{BlockDevice, BLOCK_SIZE}, inode::{bmap, DirEntry}, buffer::get_buffer_block};
+use fs::{file::{OpenFile, fopen, fread, fwrite}, filedisk::FileDisk, superblock::SB, log::LOG_MANAGER, fs::{BlockDevice, BLOCK_SIZE}, inode::{block_map, DirEntry}, buffer::get_buffer_block};
 use std::{path::PathBuf, fs::{OpenOptions, File}, sync::Arc, io::Read};
 
 use crate::fs::file::fstat;
@@ -106,7 +106,7 @@ impl Shell {
         let mut ip = fopen(self.dev.clone(), &path).ip.unwrap();
         let mut entries = vec![];
         for i in (0..ip.read_disk_inode(|diskinode| {diskinode.size})).step_by(std::mem::size_of::<DirEntry>()) {
-            let bn = bmap(&mut ip, i as u32 / BLOCK_SIZE);
+            let bn = block_map(&mut ip, i as u32 / BLOCK_SIZE);
             let entry = get_buffer_block(bn, self.dev.clone()).read().unwrap().read(
                 i as usize % BLOCK_SIZE as usize,
                 |entry : &DirEntry| {
