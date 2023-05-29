@@ -122,6 +122,12 @@ fn block_free(dev: Arc<dyn BlockDevice>, b: u32) {
 pub struct Inode {
     pub dev: Option<Arc<dyn BlockDevice>>,
     pub inum: u32,
+    // the disk inode copy should be consistent with the disk
+    // so we use a mutex to protect it
+    // write/read the disk inode with modify_disk_inode/read_disk_inode
+    // the dinode is not loaded(invalid in xv6), the dinode is None
+    // the dinode will set to None while drop 
+    // if nlink == 0 and no other inode point to it(Arc::strong_count == 2(table and the drop routine))
     pub dinode: Mutex<Option<DiskInode>>, // inode copy
 }
 
@@ -197,9 +203,6 @@ impl InodePtr {
         let mut guard = self.0.dinode.lock().unwrap();
         if guard.is_none() {
             let dinode = self.0.read_disk_inode(|dinode_ref| *dinode_ref);
-            // self.0.dinode = Some(Mutex::new(dinode));
-            // pass the borrow checker
-            // use unsafe
             *guard = Some(dinode);
         }
         f(guard.as_ref().unwrap())
@@ -208,7 +211,7 @@ impl InodePtr {
     pub fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         let mut guard = self.0.dinode.lock().unwrap();
         if guard.is_none() {
-            let dinode = self.0.read_disk_inode(|dinode_ref| *dinode_ref);
+            let dinode = self.0.read_disk_inode(|diskinode| *diskinode);
             *guard = Some(dinode);
         }
         let ret = f(guard.as_mut().unwrap());
@@ -232,7 +235,7 @@ impl InodePtrManager {
 
     // mark an inode allocated in disk
     // and return an InodePtr with NonePtr
-    pub fn alloc_inode(&self, dev: Arc<dyn BlockDevice>, ftype: FileType) -> InodePtr {
+    pub fn inode_alloc(&self, dev: Arc<dyn BlockDevice>, ftype: FileType) -> InodePtr {
         for i in ROOTINO..unsafe { SB.ninodes } {
             let (bno, off) = addr_of_inode(i);
             let blk = get_buffer_block(bno, dev.clone());
@@ -281,7 +284,7 @@ impl Drop for InodePtr {
         if Arc::strong_count(&self.0) == 2 {
             // lock the table
             info!("InodePtr::drop: drop inode {}", self.0.inum);
-            let table_guard = unsafe { InodeCache.0.lock().unwrap() };
+            let table_guard = unsafe { INODE_CACHE.0.lock().unwrap() };
             let mut dinode = self.0.dinode.lock().unwrap();
             if dinode.is_some() {
                 let dinode = dinode.as_mut().unwrap();
@@ -301,14 +304,14 @@ impl Drop for InodePtr {
     }
 }
 
-static mut InodeCache: Lazy<InodePtrManager> = Lazy::new(|| InodePtrManager::new());
+static mut INODE_CACHE: Lazy<InodePtrManager> = Lazy::new(|| InodePtrManager::new());
 
 pub fn get_inode(dev: Arc<dyn BlockDevice>, inum: u32) -> InodePtr {
-    unsafe { InodeCache.get_inode(dev, inum) }
+    unsafe { INODE_CACHE.get_inode(dev, inum) }
 }
 
-pub fn alloc_inode(dev: Arc<dyn BlockDevice>, ftype: FileType) -> InodePtr {
-    unsafe { InodeCache.alloc_inode(dev, ftype) }
+pub fn inode_alloc(dev: Arc<dyn BlockDevice>, ftype: FileType) -> InodePtr {
+    unsafe { INODE_CACHE.inode_alloc(dev, ftype) }
 }
 
 pub fn find_child(dev: Arc<dyn BlockDevice>, ip: &mut InodePtr, name: &str) -> Option<InodePtr> {
@@ -491,7 +494,7 @@ pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> 
             return Some(inode);
         }
     }
-    let mut ip = alloc_inode(dev.clone(), filetype);
+    let mut ip = inode_alloc(dev.clone(), filetype);
     // init
     ip.modify_disk_inode(|diskinode| {
         diskinode.nlink = 1;
@@ -704,7 +707,7 @@ mod test {
         unsafe { SB.init(filedisk.clone()) };
         unsafe { LOG_MANAGER.init(&SB, filedisk.clone()) };
         let manager = InodePtrManager::new();
-        let inode = manager.alloc_inode(filedisk.clone(), FileType::File);
+        let inode = manager.inode_alloc(filedisk.clone(), FileType::File);
         inode.modify_disk_inode(|diskinode| {
             diskinode.nlink = 1;
             diskinode.size = 0;
@@ -730,7 +733,7 @@ mod test {
         unsafe { SB.init(filedisk.clone()) };
         unsafe { LOG_MANAGER.init(&SB, filedisk.clone()) };
         let manager = InodePtrManager::new();
-        let mut inode = manager.alloc_inode(filedisk.clone(), FileType::File);
+        let mut inode = manager.inode_alloc(filedisk.clone(), FileType::File);
         inode.modify_disk_inode(|diskinode| {
             diskinode.nlink = 1;
             diskinode.size = 0;
