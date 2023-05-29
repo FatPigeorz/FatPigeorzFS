@@ -192,7 +192,7 @@ impl InodePtr {
         Self(Arc::new(Inode::new()))
     }
 
-    pub fn read_disk_inode<V>(&mut self, f: impl FnOnce(&DiskInode) -> V) -> V {
+    pub fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         // if the disk inode is not loaded, load it
         let mut guard = self.0.dinode.lock().unwrap();
         if guard.is_none() {

@@ -133,8 +133,7 @@ pub fn mkfs(path: PathBuf, size: u32) {
     iappend(&mut file, rootino, &sb, &buf, &mut freeblock);
 
     // fix size of root
-    let mut dinode = rinode(&mut file, &sb, rootino);
-    dinode.size = BLOCK_SIZE;
+    let dinode = rinode(&mut file, &sb, rootino);
     winode(&mut file, &sb, rootino, dinode);
 
     balloc(&mut file, &sb, freeblock);
