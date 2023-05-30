@@ -1,9 +1,6 @@
 use core::panic;
-use std::cell::RefCell;
-use std::fs::File;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex};
 
 use log::info;
 use once_cell::sync::Lazy;
@@ -89,11 +86,11 @@ fn block_alloc(dev: Arc<dyn BlockDevice>) -> Option<u32> {
             let m = 1 << (bi % 8);
             if buf[bi / 8] & m == 0 {
                 buf[bi / 8] |= m;
-                log_write(&mut guard, bi / 8, |data: &mut u8| {
+                log_write(guard, bi / 8, |data: &mut u8| {
                     *data = buf[bi / 8];
                 });
                 log_write(
-                    &mut get_buffer_block(bi as u32 + b, dev.clone())
+                    get_buffer_block(bi as u32 + b, dev.clone())
                         .write()
                         .unwrap(),
                     0,
@@ -126,7 +123,7 @@ pub struct Inode {
     // so we use a mutex to protect it
     // write/read the disk inode with modify_disk_inode/read_disk_inode
     // the dinode is not loaded(invalid in xv6), the dinode is None
-    // the dinode will set to None while drop 
+    // the dinode will set to None while drop
     // if nlink == 0 and no other inode point to it(Arc::strong_count == 2(table and the drop routine))
     pub dinode: Mutex<Option<DiskInode>>, // inode copy
 }
@@ -153,7 +150,7 @@ impl Inode {
     fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         let (blk, off) = addr_of_inode(self.inum);
         log_write(
-            &mut get_buffer_block(blk, self.dev.as_ref().unwrap().clone())
+            get_buffer_block(blk, self.dev.as_ref().unwrap().clone())
                 .write()
                 .unwrap(),
             off as usize,
@@ -243,7 +240,7 @@ impl InodePtrManager {
             let mut dinode = blk_guard.read(off as usize, |dinode: &DiskInode| *dinode);
             if dinode.ftype == FileType::Free as u16 {
                 dinode.ftype = ftype as u16;
-                log_write(&mut blk_guard, off as usize, |diskinode: &mut DiskInode| {
+                log_write(blk_guard, off as usize, |diskinode: &mut DiskInode| {
                     *diskinode = dinode;
                 });
                 return self.get_inode(dev.clone(), i);
@@ -546,7 +543,7 @@ pub fn block_map(ip: &mut InodePtr, mut bn: u32) -> u32 {
             addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
             addrs[bn as usize] = addr.unwrap();
             log_write(
-                &mut get_buffer_block(
+                get_buffer_block(
                     ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]),
                     ip.0.dev.as_ref().unwrap().clone(),
                 )
@@ -598,12 +595,12 @@ pub fn winode(ip: &mut InodePtr, src: &[u8], mut off: usize, mut n: usize) -> us
             block_map(ip, off as u32 / BLOCK_SIZE),
             ip.0.dev.as_ref().unwrap().clone(),
         );
-        let mut guard = bp.write().unwrap();
+        let guard = bp.write().unwrap();
         let mut buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
         let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
         buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]
             .copy_from_slice(&src[tot..tot + m]);
-        log_write(&mut guard, 0, |data: &mut [u8; BLOCK_SIZE as usize]| {
+        log_write(guard, 0, |data: &mut [u8; BLOCK_SIZE as usize]| {
             *data = buf;
         });
         tot += m;

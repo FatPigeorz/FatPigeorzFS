@@ -78,16 +78,17 @@ impl BufferBlock {
 
 impl BufferBlock {
     pub fn read<T, V>(&self, offset: usize, f: impl FnOnce(&T) -> V) -> V {
+        info!("{:?} read at block: {} offset: {}", std::thread::current().id(),self.block_id, offset);
         f(self.as_ref(offset))
     }
 
     pub fn write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
-        info!("write at block: {}, offset: {}", self.block_id, offset);
+        info!("{:?} write at block: {} offset: {}", std::thread::current().id(), self.block_id, offset);
         f(self.as_mut(offset))
     }
 
     pub fn sync_write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
-        info!("sync write at block: {}, offset: {}", self.block_id, offset);
+        info!("{:?} sync write at block: {} offset: {}", std::thread::current().id(), self.block_id, offset);
         let ret = f(self.as_mut(offset));
         self.sync();
         ret
@@ -284,6 +285,7 @@ impl HandleTable {
         loop {
             let mut handle = self.handles[shard_id as usize].lock().unwrap();
             if let Some(block) = handle.get(block_id, block_device.clone()) {
+                info!("{:?} get block_id: {}", std::thread::current().id(),block_id);
                 return block;
             }
         }

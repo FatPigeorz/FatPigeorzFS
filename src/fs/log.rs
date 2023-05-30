@@ -1,5 +1,6 @@
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
 
+use log::{info, debug};
 use once_cell::sync::Lazy;
 
 use super::buffer::{get_buffer_block, BufferBlock};
@@ -26,21 +27,29 @@ impl LogHeader {
 
 // the log manager in memory
 pub struct Log {
+    lock: Mutex<()>,
+    cond: Condvar,
     dev: Option<Arc<dyn BlockDevice>>,
     head: u32, // head block
     size: u32, // log max size
     outstanding: u32,
+    committing: bool,
     buffer_outstanding: Vec<Arc<RwLock<BufferBlock>>>, // for performance, the log buffer should in memory
     lh: LogHeader,                                     // log header
 }
+
+pub static mut LOG : Lazy<Log> = Lazy::new(|| Log::new());
 
 impl Log {
     fn new() -> Self {
         Self {
             dev: None,
+            lock: Mutex::new(()),
+            cond: Condvar::new(),
             head: 0,
             size: 0,
             outstanding: 0,
+            committing: false,
             buffer_outstanding: Vec::new(),
             lh: LogHeader::new(),
         }
@@ -60,6 +69,7 @@ impl Log {
     }
 
     fn write_head(&mut self) {
+        info!("{:?} write head", std::thread::current().id());
         let b = get_buffer_block(self.head, self.dev.as_ref().unwrap().clone());
         b.write().unwrap().sync_write(0, |lh: &mut LogHeader| {
             *lh = self.lh;
@@ -67,43 +77,28 @@ impl Log {
     }
 
     fn write_log(&self) {
-        for i in 0..self.lh.n {
-            if self.lh.block[i as usize] == self.head + i + 1 {
-                panic!(
-                    "log area overlap, head: {}, i: {}, block_id : {}",
-                    self.head, i, self.lh.block[i as usize]
-                );
-            }
+        (0..self.lh.n).for_each(|i| {
             assert_ne!(self.lh.block[i as usize], self.head + i + 1);
-            let from = get_buffer_block(
-                self.lh.block[i as usize],
-                self.dev.as_ref().unwrap().clone(),
-            )
-            .read()
-            .unwrap()
-            .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
             get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone())
                 .write()
                 .unwrap()
                 .sync_write(0, |buf: &mut [u8; BLOCK_SIZE as usize]| {
-                    buf.copy_from_slice(&from);
-                })
-        }
+                    buf.copy_from_slice(
+                        &get_buffer_block(
+                            self.lh.block[i as usize],
+                            self.dev.as_ref().unwrap().clone(),
+                        )
+                        .read()
+                        .unwrap()
+                        .read(0, |f: &[u8; BLOCK_SIZE as usize]| f.clone()),
+                    )
+                });
+        })
     }
 
     fn install_commit(&mut self) {
-        for i in 0..self.lh.n {
-            if self.lh.block[i as usize] == self.head + i + 1 {
-                panic!(
-                    "log area overlap, head: {}, i: {}, block_id : {}",
-                    self.head, i, self.lh.block[i as usize]
-                );
-            }
+        (0..self.lh.n).for_each(|i| {
             assert_ne!(self.lh.block[i as usize], self.head + i + 1);
-            let from = get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone())
-                .read()
-                .unwrap()
-                .read(0, |buf: &[u8; BLOCK_SIZE as usize]| buf.clone());
             get_buffer_block(
                 self.lh.block[i as usize],
                 self.dev.as_ref().unwrap().clone(),
@@ -111,13 +106,19 @@ impl Log {
             .write()
             .unwrap()
             .sync_write(0, |buf: &mut [u8; BLOCK_SIZE as usize]| {
-                buf.copy_from_slice(&from);
+                buf.copy_from_slice(
+                    &get_buffer_block(self.head + i + 1, self.dev.as_ref().unwrap().clone())
+                        .read()
+                        .unwrap()
+                        .read(0, |f: &[u8; BLOCK_SIZE as usize]| f.clone()),
+                )
             });
-        }
+        });
         self.buffer_outstanding.clear();
     }
 
     fn recover(&mut self) {
+        info!("{:?} recover", std::thread::current().id());
         self.read_head();
         self.install_commit();
         self.lh.n = 0;
@@ -137,87 +138,77 @@ impl Log {
     }
 }
 
-pub struct LogManager(Mutex<Log>, Condvar);
-
-impl LogManager {
-    fn new() -> Self {
-        LogManager(Mutex::new(Log::new()), Condvar::new())
-    }
-
-    pub fn init(&mut self, sb: &SuperBlock, dev: Arc<dyn BlockDevice>) {
-        self.0.lock().unwrap().init(sb, dev);
-    }
-
-    fn log_begin(&self) {
-        let mut log_guard = self.0.lock().unwrap();
-        loop {
-            if (log_guard.lh.n + (log_guard.outstanding + 1) * MAXOPBLOCKS) > log_guard.size {
-                // this transaction might exhaust log space;
-                log_guard = self.1.wait(log_guard).unwrap();
-            } else {
-                log_guard.outstanding += 1;
-                break;
-            }
+fn log_begin() {
+    debug!("{:?} log_begin", std::thread::current().id());
+    let mut log_guard = unsafe {LOG.lock.lock().unwrap()};
+    loop {
+        if unsafe {LOG.committing} {
+            log_guard = self.1.wait(log_guard).unwrap();
         }
-    }
-
-    fn log_end(&self) {
-        // let mut do_commit = false;
-        let mut log_guard = self.0.lock().unwrap();
-        assert!(log_guard.outstanding > 0);
-        log_guard.outstanding -= 1;
-        if log_guard.outstanding == 0 {
-            log_guard.commit();
-        }
-        self.1.notify_all();
-    }
-
-    fn write(&mut self, buffer: &RwLockWriteGuard<BufferBlock>) {
-        let mut log_guard = self.0.lock().unwrap();
-        assert!(log_guard.lh.n < LOGSIZE as u32);
-        assert!(log_guard.outstanding > 0);
-        let mut n = log_guard.lh.n;
-
-        // log absorption
-        for i in 0..log_guard.lh.n {
-            if log_guard.lh.block[i as usize] == buffer.id() {
-                n = i;
-                break;
-            }
-        }
-
-        log_guard.lh.block[n as usize] = buffer.id();
-
-        if n == log_guard.lh.n {
-            log_guard.lh.n += 1;
-            // get the buffer block
-            let dev = log_guard.dev.as_ref().unwrap().clone();
-            log_guard
-                .buffer_outstanding
-                .push(get_buffer_block(buffer.id(), dev));
+        else if (log_guard.lh.n + (log_guard.outstanding + 1) * MAXOPBLOCKS) > log_guard.size {
+            // this transaction might exhaust log space;
+            log_guard = self.1.wait(log_guard).unwrap();
+        } else {
+            log_guard.outstanding += 1;
+            break;
         }
     }
 }
 
-pub static mut LOG_MANAGER: Lazy<LogManager> = Lazy::new(|| LogManager::new());
+fn log_end(&self) {
+    debug!("{:?} log_end", std::thread::current().id());
+    let mut log_guard = self.0.lock().unwrap();
+    assert!(log_guard.outstanding > 0);
+    log_guard.outstanding -= 1;
+    assert_ne!(log_guard.committing, true);
+    if log_guard.outstanding == 0 {
+        log_guard.committing = true;
+    }
+    log_guard.commit();
+    log_guard.committing = false;
+    self.1.notify_all();
+}
+
+fn write(&mut self, buffer: RwLockWriteGuard<BufferBlock>) {
+    let mut log_guard = self.0.lock().unwrap();
+    assert!(log_guard.lh.n < LOGSIZE as u32);
+    assert!(log_guard.outstanding > 0);
+    let mut n = log_guard.lh.n;
+
+    // log absorption
+    n = (0..log_guard.lh.n)
+        .find(|i| log_guard.lh.block[*i as usize] == buffer.id())
+        .unwrap_or(n);
+    
+
+    log_guard.lh.block[n as usize] = buffer.id();
+
+    if n == log_guard.lh.n {
+        log_guard.lh.n += 1;
+        // get the buffer block
+        let dev = log_guard.dev.as_ref().unwrap().clone();
+        log_guard
+            .buffer_outstanding
+            .push(get_buffer_block(buffer.id(), dev));
+    }
+}
+
 
 // the api of logging layer
-impl LogManager {
-    pub fn log_write<T, V>(
-        &mut self,
-        buffer: &mut RwLockWriteGuard<BufferBlock>,
-        offset: usize,
-        f: impl FnOnce(&mut T) -> V,
-    ) -> V {
-        self.log_begin();
-        let ret = buffer.write(offset, f);
-        self.log_end();
-        ret
-    }
+pub fn log_write<T, V>(
+    mut buffer: RwLockWriteGuard<BufferBlock>,
+    offset: usize,
+    f: impl FnOnce(&mut T) -> V,
+) -> V {
+    log_begin();
+    let ret = buffer.write(offset, f);
+    write(buffer);
+    log_end();
+    ret
 }
 
 pub fn log_write<T, V>(
-    buffer: &mut RwLockWriteGuard<BufferBlock>,
+    buffer: RwLockWriteGuard<BufferBlock>,
     offset: usize,
     f: impl FnOnce(&mut T) -> V,
 ) -> V {
@@ -232,6 +223,8 @@ mod test {
         sync::Arc,
         thread,
     };
+
+    use env_logger::{Builder, Target};
 
     use super::super::filedisk::FileDisk;
     use super::*;
@@ -275,21 +268,27 @@ mod test {
         file.write_all(&[0 as u8; 1024 * 1024]).unwrap();
         let filedisk = Arc::new(FileDisk::new(file));
         let mut sb = SuperBlock::new();
+        // builder
+        Builder::new()
+            .target(Target::Stdout)
+            .is_test(true)
+            .filter_level(log::LevelFilter::Debug)
+            .init();
         sb.logstart = 2;
         sb.nlog = LOGSIZE;
         let mut log = Log::new();
         log.init(&sb, filedisk.clone());
         let mut lh = LogHeader::new();
-        lh.n = 1;
+        lh.n = 0;
         log.lh = lh;
         log.write_head();
         unsafe { LOG_MANAGER.init(&sb, filedisk.clone()) };
         let mut handles = Vec::new();
-        for i in 0..100u8 {
+        for i in 0..100 as u8 {
             let filedisk = filedisk.clone();
             let handle = thread::spawn(move || {
                 log_write(
-                    &mut get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone())
+                        get_buffer_block(i as u32 + 3 + LOGSIZE, filedisk.clone())
                         .write()
                         .unwrap(),
                     0,

@@ -3,8 +3,21 @@ mod mkfs;
 
 use clap::{Parser, Subcommand};
 use env_logger::{Builder, Target};
-use fs::{file::{OpenFile, fopen, fread, fwrite}, filedisk::FileDisk, superblock::SB, log::LOG_MANAGER, fs::{BlockDevice, BLOCK_SIZE}, inode::{block_map, DirEntry}, buffer::get_buffer_block};
-use std::{path::PathBuf, fs::{OpenOptions, File}, sync::Arc, io::Read};
+use fs::{
+    buffer::get_buffer_block,
+    file::{fopen, fread, fwrite, OpenFile},
+    filedisk::FileDisk,
+    fs::{BlockDevice, BLOCK_SIZE},
+    inode::{block_map, DirEntry},
+    log::LOG_MANAGER,
+    superblock::SB,
+};
+use std::{
+    fs::{File, OpenOptions},
+    io::Read,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use crate::fs::file::fstat;
 
@@ -39,7 +52,7 @@ enum Commands {
 struct Shell {
     pub dev: Arc<dyn BlockDevice>,
     pub filetable: Vec<OpenFile>,
-    pub cwd: PathBuf
+    pub cwd: PathBuf,
 }
 
 impl Shell {
@@ -58,7 +71,11 @@ impl Shell {
         unsafe { SB.init(filedisk.clone()) };
         unsafe { LOG_MANAGER.init(&SB, filedisk.clone()) };
         let root = fopen(filedisk.clone(), &PathBuf::from("/".to_string()));
-        Self { dev: filedisk, filetable: vec![root], cwd: PathBuf::from("/".to_string()) }
+        Self {
+            dev: filedisk,
+            filetable: vec![root],
+            cwd: PathBuf::from("/".to_string()),
+        }
     }
 
     pub fn eval(&mut self) {
@@ -74,7 +91,7 @@ impl Shell {
                 "ls" => {
                     let path = match args.next() {
                         Some(path) => path,
-                        None => self.cwd.to_str().unwrap()
+                        None => self.cwd.to_str().unwrap(),
                     };
                     self.ls(PathBuf::from(path));
                 }
@@ -105,14 +122,14 @@ impl Shell {
     fn ls(&self, path: PathBuf) {
         let mut ip = fopen(self.dev.clone(), &path).ip.unwrap();
         let mut entries = vec![];
-        for i in (0..ip.read_disk_inode(|diskinode| {diskinode.size})).step_by(std::mem::size_of::<DirEntry>()) {
+        for i in (0..ip.read_disk_inode(|diskinode| diskinode.size))
+            .step_by(std::mem::size_of::<DirEntry>())
+        {
             let bn = block_map(&mut ip, i as u32 / BLOCK_SIZE);
-            let entry = get_buffer_block(bn, self.dev.clone()).read().unwrap().read(
-                i as usize % BLOCK_SIZE as usize,
-                |entry : &DirEntry| {
-                    *entry
-                }
-            );
+            let entry = get_buffer_block(bn, self.dev.clone())
+                .read()
+                .unwrap()
+                .read(i as usize % BLOCK_SIZE as usize, |entry: &DirEntry| *entry);
             if entry.inum == 0 {
                 continue;
             }
@@ -121,17 +138,20 @@ impl Shell {
 
         // file open and fstat
         for entry in entries {
-            // join path and name 
+            // join path and name
             let name = String::from_utf8(Vec::from(entry.name)).unwrap();
             let fpath = PathBuf::from(self.cwd.clone()).join(name.clone());
             let mut file = fopen(self.dev.clone(), &fpath);
             let stat = fstat(&mut file);
-            println!("name: {}\t size:{}\t name:{}", stat.name, stat.size,
-                 match stat.type_ {
+            println!(
+                "name: {}\t size:{}\t name:{}",
+                stat.name,
+                stat.size,
+                match stat.type_ {
                     fs::fs::FileType::Dir => "Dir",
                     fs::fs::FileType::File => "File",
                     fs::fs::FileType::Free => "Free",
-                 }
+                }
             );
         }
     }
@@ -159,7 +179,7 @@ impl Shell {
         }
     }
 
-    fn write (&mut self, from: PathBuf, to: PathBuf) {
+    fn write(&mut self, from: PathBuf, to: PathBuf) {
         // from is the true file system
         // to is the virtual file system
         let mut from = std::fs::File::open(from).unwrap();
@@ -175,7 +195,6 @@ impl Shell {
     }
 }
 
-
 fn main() {
     // init builder
     let mut builder = Builder::new();
@@ -189,11 +208,9 @@ fn main() {
             println!("mkfs: path: {:?}, size: {}", path, size);
             mkfs::mkfs(path, size * 1024);
         }
-        Commands::Shell { path } => 
-            Shell::new(path).eval(),
+        Commands::Shell { path } => Shell::new(path).eval(),
     }
 }
-
 
 #[cfg(test)]
 mod test {
