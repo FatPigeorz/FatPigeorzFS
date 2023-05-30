@@ -1,4 +1,5 @@
 use core::panic;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +9,6 @@ use once_cell::sync::Lazy;
 use crate::fs::fs::BLOCK_SIZE;
 
 use super::fs::{NINDIRECT, NINODES, ROOTINO};
-use super::log::{log_begin, log_write};
 use super::{
     buffer::get_buffer_block,
     fs::{BlockDevice, FileType, BPB, IPB, NAMESIZE, NDIRECT},
@@ -154,24 +154,26 @@ impl Inode {
 
     pub fn truncate(dev: Arc<dyn BlockDevice>, dinode: &mut DiskInode) {
         // free the data blocks
-        for i in 0..NDIRECT {
-            if dinode.addrs[i as usize] != 0 {
-                block_free(dev.clone(), dinode.addrs[i as usize]);
-                dinode.addrs[i as usize] = 0;
-            }
-        }
-
+        dinode
+            .addrs
+            .iter_mut()
+            .take(NDIRECT as usize)
+            .filter(|i| **i != 0)
+            .for_each(|i| {
+                block_free(dev.clone(), *i);
+                *i = 0;
+            });
         if dinode.addrs[NDIRECT as usize] > 0 {
             // read the indirect block
             let addrs = get_buffer_block(dinode.addrs[NDIRECT as usize], dev.clone())
                 .read()
                 .unwrap()
                 .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
-            for i in 0..NINDIRECT as usize {
-                if addrs[i] != 0 {
-                    block_free(dev.clone(), addrs[i as usize]);
-                }
-            }
+            addrs
+                .iter()
+                .take(NINDIRECT as usize)
+                .filter(|i| **i != 0)
+                .for_each(|i| block_free(dev.clone(), *i));
             block_free(dev.clone(), dinode.addrs[NDIRECT as usize]);
             dinode.addrs[NDIRECT as usize] = 0;
         }
@@ -217,11 +219,7 @@ pub struct InodePtrManager(Mutex<Vec<InodePtr>>);
 
 impl InodePtrManager {
     pub fn new() -> Self {
-        let mut v = Vec::new();
-        for _ in 0..NINODES {
-            v.push(InodePtr::new());
-        }
-        Self(Mutex::new(v))
+        Self(Mutex::new((0..NINODES).map(|_| InodePtr::new()).collect()))
     }
 
     // mark an inode allocated in disk
@@ -360,57 +358,13 @@ pub fn find_inode(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Option<InodePtr>
     if *path == PathBuf::from("/") {
         return Some(inode);
     }
-    // iter from next
+    if path.iter().next() != Some(&OsString::from("/")) {
+        return None;
+    }
     for name in path.iter().skip(1) {
-        let mut found = false;
-        let entries = inode.read_disk_inode(|diskinode| {
-            let mut entries = Vec::new();
-            for i in 0..NDIRECT {
-                if diskinode.addrs[i as usize] != 0 {
-                    // read entries
-                    for j in (0..BLOCK_SIZE).step_by(std::mem::size_of::<DirEntry>()) {
-                        let entry = get_buffer_block(diskinode.addrs[i as usize], dev.clone())
-                            .read()
-                            .unwrap()
-                            .read(j as usize, |entry: &DirEntry| *entry);
-                        if entry.inum != 0 && !(i == 0 && j <= 2) {
-                            entries.push(entry);
-                        }
-                    }
-                }
-            }
-            // read indirect block
-            if diskinode.addrs[NDIRECT as usize] != 0 {
-                let addrs = get_buffer_block(diskinode.addrs[NDIRECT as usize], dev.clone())
-                    .read()
-                    .unwrap()
-                    .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
-                for i in 0..NINDIRECT as usize {
-                    if addrs[i] != 0 {
-                        // read entries
-                        for j in (0..BLOCK_SIZE).step_by(std::mem::size_of::<DirEntry>()) {
-                            let entry = get_buffer_block(addrs[i], dev.clone())
-                                .read()
-                                .unwrap()
-                                .read(j as usize, |entry: &DirEntry| *entry);
-                            if entry.inum != 0 {
-                                entries.push(entry);
-                            }
-                        }
-                    }
-                }
-            }
-            entries
-        });
-        for entry in entries {
-            if namecmp(&entry.name, &name.to_str().unwrap().to_string()) {
-                found = true;
-                inode = get_inode(dev.clone(), entry.inum);
-                break;
-            }
-        }
-        if !found {
-            return None;
+        inode = match find_child(dev.clone(), &mut inode, name.to_str().unwrap()) {
+            Some(inode) => inode,
+            None => return None,
         }
     }
     Some(inode)
@@ -650,7 +604,7 @@ mod test {
             .unwrap();
         let filedisk = Arc::new(FileDisk::new(file));
         let manager = InodePtrManager::new();
-        let mut inode = manager.get_inode(filedisk.clone(), ROOTINO);
+        let inode = manager.get_inode(filedisk.clone(), ROOTINO);
         // sb init
         unsafe { SB.init(filedisk.clone()) };
         // ls root
