@@ -82,20 +82,25 @@ fn block_alloc(dev: Arc<dyn BlockDevice>) -> Option<u32> {
         let blk = get_buffer_block(bno, dev.clone());
         let mut guard = blk.write().unwrap();
         let mut buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
-        for bi in 0..BPB as usize {
-            let m = 1 << (bi % 8);
-            if buf[bi / 8] & m == 0 {
-                buf[bi / 8] |= m;
-                guard.write(bi / 8, |data: &mut u8| {
-                    *data = buf[bi / 8];
-                });
-                get_buffer_block(bi as u32 + b, dev.clone())
-                    .write()
-                    .unwrap()
-                    .write(0, |data: &mut [u8; BLOCK_SIZE as usize]| {
-                        data.fill(0);
+        for (i, byte) in buf.iter_mut().enumerate() {
+            if *byte == 0xff {
+                continue;
+            }
+            for j in 0..8 {
+                let m = 1 << j;
+                if *byte & m == 0 {
+                    *byte |= m;
+                    guard.write(i, |data: &mut u8| {
+                        *data = *byte;
                     });
-                return Some(b + bi as u32);
+                    get_buffer_block(b + i as u32 * 8 + j, dev.clone())
+                        .write()
+                        .unwrap()
+                        .write(0, |data: &mut [u8; BLOCK_SIZE as usize]| {
+                            data.fill(0);
+                        });
+                    return Some(b + i as u32 * 8 + j);
+                }
             }
         }
     }
