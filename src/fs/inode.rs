@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use crate::fs::fs::BLOCK_SIZE;
 
 use super::fs::{NINDIRECT, NINODES, ROOTINO};
-use super::log::log_write;
+use super::log::{log_begin, log_write};
 use super::{
     buffer::get_buffer_block,
     fs::{BlockDevice, FileType, BPB, IPB, NAMESIZE, NDIRECT},
@@ -86,18 +86,15 @@ fn block_alloc(dev: Arc<dyn BlockDevice>) -> Option<u32> {
             let m = 1 << (bi % 8);
             if buf[bi / 8] & m == 0 {
                 buf[bi / 8] |= m;
-                log_write(guard, bi / 8, |data: &mut u8| {
+                guard.write(bi / 8, |data: &mut u8| {
                     *data = buf[bi / 8];
                 });
-                log_write(
-                    get_buffer_block(bi as u32 + b, dev.clone())
-                        .write()
-                        .unwrap(),
-                    0,
-                    |data: &mut [u8; BLOCK_SIZE as usize]| {
+                get_buffer_block(bi as u32 + b, dev.clone())
+                    .write()
+                    .unwrap()
+                    .write(0, |data: &mut [u8; BLOCK_SIZE as usize]| {
                         data.fill(0);
-                    },
-                );
+                    });
                 return Some(b + bi as u32);
             }
         }
@@ -149,13 +146,10 @@ impl Inode {
 
     fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         let (blk, off) = addr_of_inode(self.inum);
-        log_write(
-            get_buffer_block(blk, self.dev.as_ref().unwrap().clone())
-                .write()
-                .unwrap(),
-            off as usize,
-            f,
-        )
+        get_buffer_block(blk, self.dev.as_ref().unwrap().clone())
+            .write()
+            .unwrap()
+            .write(off as usize, f)
     }
 
     pub fn truncate(dev: Arc<dyn BlockDevice>, dinode: &mut DiskInode) {
@@ -240,7 +234,7 @@ impl InodePtrManager {
             let mut dinode = blk_guard.read(off as usize, |dinode: &DiskInode| *dinode);
             if dinode.ftype == FileType::Free as u16 {
                 dinode.ftype = ftype as u16;
-                log_write(blk_guard, off as usize, |diskinode: &mut DiskInode| {
+                blk_guard.write(off as usize, |diskinode: &mut DiskInode| {
                     *diskinode = dinode;
                 });
                 return self.get_inode(dev.clone(), i);
@@ -542,18 +536,15 @@ pub fn block_map(ip: &mut InodePtr, mut bn: u32) -> u32 {
         if addrs[bn as usize] == 0 {
             addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
             addrs[bn as usize] = addr.unwrap();
-            log_write(
-                get_buffer_block(
-                    ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]),
-                    ip.0.dev.as_ref().unwrap().clone(),
-                )
-                .write()
-                .unwrap(),
-                0,
-                |data: &mut [u32; NINDIRECT as usize]| {
-                    *data = addrs;
-                },
-            );
+            get_buffer_block(
+                ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]),
+                ip.0.dev.as_ref().unwrap().clone(),
+            )
+            .write()
+            .unwrap()
+            .write(0, |data: &mut [u32; NINDIRECT as usize]| {
+                *data = addrs;
+            });
         } else {
             addr = Some(addrs[bn as usize]);
         }
@@ -595,12 +586,12 @@ pub fn winode(ip: &mut InodePtr, src: &[u8], mut off: usize, mut n: usize) -> us
             block_map(ip, off as u32 / BLOCK_SIZE),
             ip.0.dev.as_ref().unwrap().clone(),
         );
-        let guard = bp.write().unwrap();
+        let mut guard = bp.write().unwrap();
         let mut buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
         let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
         buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]
             .copy_from_slice(&src[tot..tot + m]);
-        log_write(guard, 0, |data: &mut [u8; BLOCK_SIZE as usize]| {
+        guard.write(0, |data: &mut [u8; BLOCK_SIZE as usize]| {
             *data = buf;
         });
         tot += m;

@@ -78,17 +78,32 @@ impl BufferBlock {
 
 impl BufferBlock {
     pub fn read<T, V>(&self, offset: usize, f: impl FnOnce(&T) -> V) -> V {
-        info!("{:?} read at block: {} offset: {}", std::thread::current().id(),self.block_id, offset);
+        info!(
+            "{:?} read at block: {} offset: {}",
+            std::thread::current().id(),
+            self.block_id,
+            offset
+        );
         f(self.as_ref(offset))
     }
 
     pub fn write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
-        info!("{:?} write at block: {} offset: {}", std::thread::current().id(), self.block_id, offset);
+        info!(
+            "{:?} write at block: {} offset: {}",
+            std::thread::current().id(),
+            self.block_id,
+            offset
+        );
         f(self.as_mut(offset))
     }
 
     pub fn sync_write<T, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
-        info!("{:?} sync write at block: {} offset: {}", std::thread::current().id(), self.block_id, offset);
+        info!(
+            "{:?} sync write at block: {} offset: {}",
+            std::thread::current().id(),
+            self.block_id,
+            offset
+        );
         let ret = f(self.as_mut(offset));
         self.sync();
         ret
@@ -257,22 +272,22 @@ pub struct HandleTable {
 impl HandleTable {
     fn new(shard_num: u32, block_num: u32) -> Self {
         assert_eq!(block_num % shard_num, 0);
-        let mut handles = Vec::with_capacity(shard_num as usize);
-        for _ in 0..shard_num {
-            let handle = LruHandle::new();
-            // push block_num / shard_num nodes
-            for _ in 0..(block_num / shard_num) {
-                let node = NodePtr::new(Box::into_raw(Box::new(Node {
-                    data: Arc::new(RwLock::new(BufferBlock::new())),
-                    next: None,
-                    prev: None,
-                })))
-                .unwrap();
-                handle.push_front(node);
-            }
-            handles.push(Arc::new(Mutex::new(handle)));
-        }
-        Self { handles: handles }
+        let handles = (0..shard_num)
+            .map(|_| {
+                let handle = LruHandle::new();
+                (0..(block_num / shard_num)).for_each(|_| {
+                    let node = NodePtr::new(Box::into_raw(Box::new(Node {
+                        data: Arc::new(RwLock::new(BufferBlock::new())),
+                        next: None,
+                        prev: None,
+                    })))
+                    .unwrap();
+                    handle.push_front(node);
+                });
+                Arc::new(Mutex::new(handle))
+            })
+            .collect::<Vec<_>>();
+        Self { handles }
     }
 
     fn get(
@@ -285,7 +300,11 @@ impl HandleTable {
         loop {
             let mut handle = self.handles[shard_id as usize].lock().unwrap();
             if let Some(block) = handle.get(block_id, block_device.clone()) {
-                info!("{:?} get block_id: {}", std::thread::current().id(),block_id);
+                info!(
+                    "{:?} get block_id: {}",
+                    std::thread::current().id(),
+                    block_id
+                );
                 return block;
             }
         }
