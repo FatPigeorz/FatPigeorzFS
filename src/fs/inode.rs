@@ -8,6 +8,7 @@ use once_cell::sync::Lazy;
 
 use crate::fs::fs::BLOCK_SIZE;
 
+use super::file::Stat;
 use super::fs::{NINDIRECT, NINODES, ROOTINO};
 use super::{
     buffer::get_buffer_block,
@@ -189,7 +190,8 @@ impl Inode {
 // InodePtr is a pointer to Inode
 // Every File should have a InodePtr
 // Many file many have a ptr to same inode
-pub struct InodePtr(Arc<Inode>);
+#[derive(Clone)]
+pub struct InodePtr(pub Arc<Inode>);
 
 impl InodePtr {
     pub fn new() -> Self {
@@ -229,7 +231,7 @@ impl InodePtrManager {
 
     // mark an inode allocated in disk
     // and return an InodePtr with NonePtr
-    pub fn inode_alloc(&self, dev: Arc<dyn BlockDevice>, ftype: FileType) -> InodePtr {
+    pub fn inode_alloc(&self, dev: Arc<dyn BlockDevice>, ftype: FileType) -> Option<InodePtr> {
         for i in ROOTINO..unsafe { SB.ninodes } {
             let (bno, off) = addr_of_inode(i);
             let blk = get_buffer_block(bno, dev.clone());
@@ -240,10 +242,10 @@ impl InodePtrManager {
                 blk_guard.write(off as usize, |diskinode: &mut DiskInode| {
                     *diskinode = dinode;
                 });
-                return self.get_inode(dev.clone(), i);
+                return Some(self.get_inode(dev.clone(), i));
             }
         }
-        panic!("InodePtrManager::alloc_inode: no free inode");
+        None
     }
 
     pub fn get_inode(&self, dev: Arc<dyn BlockDevice>, inum: u32) -> InodePtr {
@@ -304,52 +306,49 @@ pub fn get_inode(dev: Arc<dyn BlockDevice>, inum: u32) -> InodePtr {
     unsafe { INODE_CACHE.get_inode(dev, inum) }
 }
 
-pub fn inode_alloc(dev: Arc<dyn BlockDevice>, ftype: FileType) -> InodePtr {
+pub fn inode_alloc(dev: Arc<dyn BlockDevice>, ftype: FileType) -> Option<InodePtr> {
     unsafe { INODE_CACHE.inode_alloc(dev, ftype) }
 }
 
-pub fn find_child(dev: Arc<dyn BlockDevice>, ip: &mut InodePtr, name: &str) -> Option<InodePtr> {
-    let entries = ip.read_disk_inode(|diskinode| {
-        let mut entries = Vec::new();
-        for i in 0..NDIRECT {
-            if diskinode.addrs[i as usize] != 0 {
+pub fn find_child(dev: Arc<dyn BlockDevice>, mut diskinode: DiskInode, name: &str) -> Option<InodePtr> {
+    let mut entries = Vec::new();
+    for i in 0..NDIRECT {
+        if diskinode.addrs[i as usize] != 0 {
+            // read entries
+            for j in (0 * std::mem::size_of::<DirEntry>()..BLOCK_SIZE as usize)
+                .step_by(std::mem::size_of::<DirEntry>())
+            {
+                let entry = get_buffer_block(diskinode.addrs[i as usize], dev.clone())
+                    .read()
+                    .unwrap()
+                    .read(j, |entry: &DirEntry| *entry);
+                if entry.inum != 0 && !(i == 0 && j <= 2) {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+    // read indirect block
+    if diskinode.addrs[NDIRECT as usize] != 0 {
+        let addrs = get_buffer_block(diskinode.addrs[NDIRECT as usize], dev.clone())
+            .read()
+            .unwrap()
+            .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
+        for i in 0..NINDIRECT as usize {
+            if addrs[i] != 0 {
                 // read entries
-                for j in (0 * std::mem::size_of::<DirEntry>()..BLOCK_SIZE as usize)
-                    .step_by(std::mem::size_of::<DirEntry>())
-                {
-                    let entry = get_buffer_block(diskinode.addrs[i as usize], dev.clone())
+                for j in (0..BLOCK_SIZE).step_by(std::mem::size_of::<DirEntry>()) {
+                    let entry = get_buffer_block(addrs[i], dev.clone())
                         .read()
                         .unwrap()
-                        .read(j, |entry: &DirEntry| *entry);
-                    if entry.inum != 0 && !(i == 0 && j <= 2) {
+                        .read(j as usize, |entry: &DirEntry| *entry);
+                    if entry.inum != 0 {
                         entries.push(entry);
                     }
                 }
             }
         }
-        // read indirect block
-        if diskinode.addrs[NDIRECT as usize] != 0 {
-            let addrs = get_buffer_block(diskinode.addrs[NDIRECT as usize], dev.clone())
-                .read()
-                .unwrap()
-                .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
-            for i in 0..NINDIRECT as usize {
-                if addrs[i] != 0 {
-                    // read entries
-                    for j in (0..BLOCK_SIZE).step_by(std::mem::size_of::<DirEntry>()) {
-                        let entry = get_buffer_block(addrs[i], dev.clone())
-                            .read()
-                            .unwrap()
-                            .read(j as usize, |entry: &DirEntry| *entry);
-                        if entry.inum != 0 {
-                            entries.push(entry);
-                        }
-                    }
-                }
-            }
-        }
-        entries
-    });
+    }
     for entry in entries {
         if namecmp(&entry.name, &name.to_string()) {
             return Some(get_inode(dev.clone(), entry.inum));
@@ -367,7 +366,8 @@ pub fn find_inode(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Option<InodePtr>
         return None;
     }
     for name in path.iter().skip(1) {
-        inode = match find_child(dev.clone(), &mut inode, name.to_str().unwrap()) {
+        let dinode = inode.0.read_disk_inode(|diskinode| *diskinode);
+        inode = match find_child(dev.clone(), dinode, name.to_str().unwrap()) {
             Some(inode) => inode,
             None => return None,
         }
@@ -380,7 +380,7 @@ pub fn find_parent_inode(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Option<In
     find_inode(dev, &parent)
 }
 
-pub fn dirlink(dev: Arc<dyn BlockDevice>, dp: &mut InodePtr, name: &str, inum: u32) {
+pub fn dirlink(dp: &mut InodePtr, name: &str, inum: u32) {
     // look for an empty dirent
     let mut de = DirEntry::default();
     let size = dp.0.read_disk_inode(|diskinode| diskinode.size as usize);
@@ -433,10 +433,12 @@ pub fn dirunlink(dev: Arc<dyn BlockDevice>, dp: &mut InodePtr, name: &str) {
 pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> Option<InodePtr> {
     let parent_dir = find_parent_inode(dev.clone(), path);
     let mut dp = parent_dir.unwrap();
+    let dp_dinode = dp.0.read_disk_inode(|diskinode| *diskinode);
     // alloc
+    let dp_guard = dp.0.dinode.lock().unwrap();
     let ip = find_child(
         dev.clone(),
-        &mut dp,
+        dp_dinode,
         path.file_name().unwrap().to_str().unwrap(),
     );
     if let Some(inode) = ip {
@@ -444,60 +446,63 @@ pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> 
             return Some(inode);
         }
     }
-    let mut ip = inode_alloc(dev.clone(), filetype);
-    // init
-    ip.modify_disk_inode(|diskinode| {
-        diskinode.nlink = 1;
-        diskinode.size = 0;
-    });
-    if filetype == FileType::Dir {
-        // create . and ..
-        let ip_inum = ip.0.inum;
-        dirlink(dev.clone(), &mut ip, ".", ip_inum);
-        dirlink(dev.clone(), &mut ip, "..", dp.0.inum);
-    }
-    let name = path.file_name().unwrap().to_str().unwrap();
-    dirlink(dev.clone(), &mut dp, name, ip.0.inum);
-    if filetype == FileType::Dir {
-        // update parent dir size
-        dp.modify_disk_inode(|diskinode| {
-            diskinode.nlink += 1;
+    if let Some(mut ip) = inode_alloc(dev.clone(), filetype) {
+        // init
+        ip.modify_disk_inode(|diskinode| {
+            diskinode.nlink = 1;
+            diskinode.size = 0;
         });
-    }
-    Some(ip)
+        // the inode ptr will not be dropped, so it's safe to lock stagely
+        if filetype == FileType::Dir {
+            // create . and ..
+            let ip_inum = ip.0.inum;
+            dirlink(&mut ip, ".", ip_inum);
+            dirlink(&mut ip, "..", dp.0.inum);
+        }
+        let name = path.file_name().unwrap().to_str().unwrap();
+        drop(dp_guard);
+        dirlink(&mut dp, name, ip.0.inum);
+        if filetype == FileType::Dir {
+            // update parent dir size
+            dp.modify_disk_inode(|diskinode| diskinode.nlink += 1);
+        }
+        Some(ip)
+   } else {
+        None
+   }
 }
 
 // get the bn'th block of inode
-pub fn block_map(ip: &mut InodePtr, mut bn: u32) -> u32 {
+pub fn block_map(diskinode: &mut DiskInode, dev: Arc<dyn BlockDevice>, mut offset_bn: u32) -> u32 {
     let mut addr = None;
-    if bn < NDIRECT {
-        if ip.read_disk_inode(|diskinode| diskinode.addrs[bn as usize]) == 0 {
-            addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
-            ip.0.dinode.lock().unwrap().as_mut().unwrap().addrs[bn as usize] = addr.unwrap();
+    if offset_bn < NDIRECT {
+        if diskinode.addrs[offset_bn as usize] == 0 {
+            addr = block_alloc(dev.clone());
+            diskinode.addrs[offset_bn as usize] = addr.unwrap();
         } else {
-            addr = Some(ip.read_disk_inode(|diskinode| diskinode.addrs[bn as usize]));
+            addr = Some(diskinode.addrs[offset_bn as usize]);
         }
         return addr.unwrap();
     }
-    bn -= NDIRECT;
-    if bn < NINDIRECT {
-        if ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]) == 0 {
-            addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
-            ip.0.dinode.lock().unwrap().as_mut().unwrap().addrs[NDIRECT as usize] = addr.unwrap();
+    offset_bn -= NDIRECT;
+    if offset_bn < NINDIRECT {
+        if diskinode.addrs[NDIRECT as usize] == 0 {
+            addr = block_alloc(dev.clone());
+            diskinode.addrs[NDIRECT as usize] = addr.unwrap();
         }
         let mut addrs = get_buffer_block(
-            ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]),
-            ip.0.dev.as_ref().unwrap().clone(),
+            diskinode.addrs[NDIRECT as usize],
+            dev.clone(),
         )
         .read()
         .unwrap()
         .read(0, |addrs: &[u32; NINDIRECT as usize]| *addrs);
-        if addrs[bn as usize] == 0 {
-            addr = block_alloc(ip.0.dev.as_ref().unwrap().clone());
-            addrs[bn as usize] = addr.unwrap();
+        if addrs[offset_bn as usize] == 0 {
+            addr = block_alloc(dev.clone());
+            addrs[offset_bn as usize] = addr.unwrap();
             get_buffer_block(
-                ip.read_disk_inode(|diskinode| diskinode.addrs[NDIRECT as usize]),
-                ip.0.dev.as_ref().unwrap().clone(),
+                diskinode.addrs[NDIRECT as usize],
+                dev.clone(),
             )
             .write()
             .unwrap()
@@ -505,7 +510,7 @@ pub fn block_map(ip: &mut InodePtr, mut bn: u32) -> u32 {
                 *data = addrs;
             });
         } else {
-            addr = Some(addrs[bn as usize]);
+            addr = Some(addrs[offset_bn as usize]);
         }
         return addr.unwrap();
     }
@@ -513,59 +518,63 @@ pub fn block_map(ip: &mut InodePtr, mut bn: u32) -> u32 {
 }
 
 pub fn rinode(ip: &mut InodePtr, dst: &mut [u8], mut off: usize, mut n: usize) -> usize {
-    let size = ip.read_disk_inode(|diskinode| diskinode.size as usize);
-    if off > size {
-        return 0;
-    }
-    if off + n > size {
-        n = size - off;
-    }
-    let mut tot = 0;
-    while tot < n {
-        let bp = get_buffer_block(
-            block_map(ip, off as u32 / BLOCK_SIZE),
-            ip.0.dev.as_ref().unwrap().clone(),
-        );
-        let guard = bp.read().unwrap();
-        let buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
-        let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
-        dst[tot..tot + m]
-            .copy_from_slice(&buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]);
-        tot += m;
-        off += m;
-    }
-    tot
+    ip.modify_disk_inode(|mut diskinode| {
+        let size = diskinode.size as usize;
+        if off > size {
+            return 0;
+        }
+        if off + n > size {
+            n = size - off;
+        }
+        let mut tot = 0;
+        while tot < n {
+            let bp = get_buffer_block(
+                block_map(diskinode, ip.0.dev.as_ref().unwrap().clone(), off as u32 / BLOCK_SIZE),
+                ip.0.dev.as_ref().unwrap().clone(),
+            );
+            let guard = bp.read().unwrap();
+            let buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
+            let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
+            dst[tot..tot + m]
+                .copy_from_slice(&buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]);
+            tot += m;
+            off += m;
+        }
+        tot
+    })
 }
 
 pub fn winode(ip: &mut InodePtr, src: &[u8], mut off: usize, mut n: usize) -> usize {
     info!("winode: inum {} off {}, n {}", ip.0.inum, off, n);
-    let mut tot = 0;
-    while tot < n {
-        let bp = get_buffer_block(
-            block_map(ip, off as u32 / BLOCK_SIZE),
-            ip.0.dev.as_ref().unwrap().clone(),
-        );
-        let mut guard = bp.write().unwrap();
-        let mut buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
-        let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
-        buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]
-            .copy_from_slice(&src[tot..tot + m]);
-        guard.write(0, |data: &mut [u8; BLOCK_SIZE as usize]| {
-            *data = buf;
-        });
-        tot += m;
-        off += m;
-    }
-    if off > ip.read_disk_inode(|diskinode| diskinode.size as usize) {
-        ip.modify_disk_inode(|diskinode| {
+    ip.modify_disk_inode(
+        |diskinode| {
+        let mut tot = 0;
+        while tot < n {
+            let bp = get_buffer_block(
+                block_map(diskinode, ip.0.dev.as_ref().unwrap().clone(), off as u32 / BLOCK_SIZE),
+                ip.0.dev.as_ref().unwrap().clone(),
+            );
+            let mut guard = bp.write().unwrap();
+            let mut buf = guard.read(0, |buf: &[u8; BLOCK_SIZE as usize]| *buf);
+            let m = std::cmp::min(n - tot, BLOCK_SIZE as usize - off % BLOCK_SIZE as usize);
+            buf[off % BLOCK_SIZE as usize..off % BLOCK_SIZE as usize + m]
+                .copy_from_slice(&src[tot..tot + m]);
+            guard.write(0, |data: &mut [u8; BLOCK_SIZE as usize]| {
+                *data = buf;
+            });
+            tot += m;
+            off += m;
+        }
+        if off > diskinode.size as usize  {
             diskinode.size = off as u32;
             info!(
                 "winode: inode {} increase size {}",
                 ip.0.inum, diskinode.size
             );
-        });
-    }
-    tot
+        }
+        tot
+        }
+    )
 }
 
 #[cfg(test)]
@@ -655,7 +664,7 @@ mod test {
         unsafe { LOG_MANAGER.init(&SB, filedisk.clone()) };
         let manager = InodePtrManager::new();
         let inode = manager.inode_alloc(filedisk.clone(), FileType::File);
-        inode.modify_disk_inode(|diskinode| {
+        inode.unwrap().modify_disk_inode(|diskinode| {
             diskinode.nlink = 1;
             diskinode.size = 0;
         });
@@ -680,12 +689,12 @@ mod test {
         unsafe { SB.init(filedisk.clone()) };
         unsafe { LOG_MANAGER.init(&SB, filedisk.clone()) };
         let manager = InodePtrManager::new();
-        let mut inode = manager.inode_alloc(filedisk.clone(), FileType::File);
-        inode.modify_disk_inode(|diskinode| {
+        let inode = manager.inode_alloc(filedisk.clone(), FileType::File);
+        let addr = inode.unwrap().modify_disk_inode(|diskinode| {
             diskinode.nlink = 1;
             diskinode.size = 0;
+            super::block_map(diskinode, filedisk, 0)
         });
-        let addr = super::block_map(&mut inode, 0);
         assert_eq!(addr, 197);
     }
 

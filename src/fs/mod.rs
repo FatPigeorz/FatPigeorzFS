@@ -5,3 +5,4 @@ pub mod fs;
 pub mod inode;
 pub mod log;
 pub mod superblock;
+pub mod syscall;

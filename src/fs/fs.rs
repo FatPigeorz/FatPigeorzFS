@@ -21,7 +21,6 @@ pub const MAXOPBLOCKS: u32 = 16;
 pub const LOGSIZE: u32 = MAXOPBLOCKS * 4 + 1;
 
 pub const NINODES: u32 = 1024;
-use std::sync::Arc;
 
 // Inodes per block.
 use super::inode::DiskInode;
@@ -35,6 +34,12 @@ pub enum FileType {
     Free = 0,
     File = 1,
     Dir = 2,
+}
+
+impl Default for FileType {
+    fn default() -> Self {
+        FileType::Free
+    }
 }
 
 pub trait BlockDevice: Send + Sync {
