@@ -7,3 +7,6 @@
 Cargo.lock
 mkfs.log
 ReadMe.txt
+*.png
+*.md
+*.pdf
