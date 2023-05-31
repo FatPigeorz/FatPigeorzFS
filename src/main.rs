@@ -4,7 +4,7 @@ mod mkfs;
 use clap::{Parser, Subcommand};
 use env_logger::{Builder};
 use fs::{
-    buffer::get_buffer_block,
+    buffer::{get_buffer_block, sync_all},
     file::{fileopen, fileread, filewrite, OpenFile, OpenMode},
     filedisk::FileDisk,
     fs::{BlockDevice, BLOCK_SIZE},
@@ -19,7 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::fs::{file::{filestat, FileTable}, fs::FileType};
+use crate::fs::{file::{filestat, fileclose}, fs::FileType};
 
 #[derive(Parser, Debug)]
 #[command(name = "FatPigeorzFS")]
@@ -51,6 +51,7 @@ enum Commands {
 
 struct Shell {
     pub dev: Arc<dyn BlockDevice>,
+    #[allow(unused)]
     pub filetable: Vec<OpenFile>,
     pub cwd: PathBuf,
 }
@@ -92,6 +93,9 @@ impl Shell {
             let cmd = args.next().unwrap();
             // print prompt
             match cmd {
+                "exit" => {
+                    break;
+                }
                 "ls" => {
                     let path = match args.next() {
                         Some(path) => PathBuf::from(self.cwd.clone()).join(path),
@@ -112,38 +116,38 @@ impl Shell {
                     let to = args.next().unwrap();
                     self.write(PathBuf::from(from), PathBuf::from(to));
                 }
-                // "mkdir" => {
-                //     let path = args.next().unwrap();
-                //     self.mkdir(PathBuf::from(path));
-                // }
+                "mkdir" => {
+                    let path = args.next().unwrap();
+                    self.mkdir(PathBuf::from(path));
+                }
+                "touch" => {
+                    let path = args.next().unwrap();
+                    self.touch(PathBuf::from(path));
+                }
+                "rm" => {
+                    let path = args.next().unwrap();
+                    self.rm(PathBuf::from(path));
+                }
+                "rmdir" => {
+                    let path = args.next().unwrap();
+                    self.rmdir(PathBuf::from(path));
+                }
                 _ => {
                     println!("command not found: {}", cmd);
                 }
             }
         }
+        sync_all();
     }
 
     fn ls(&self, path: PathBuf) {
         let fd = fileopen(self.dev.clone(), &path, OpenMode::ORdonly).unwrap();
-        let ip = unsafe { (*fd.0.as_ptr()).ip.as_ref().unwrap() };
         let mut entries = vec![];
-        for i in (0..ip.read_disk_inode(|diskinode| diskinode.size))
-            .step_by(std::mem::size_of::<DirEntry>())
-        {
-            let bn = ip.modify_disk_inode(|diskinode| {
-                block_map(diskinode, self.dev.clone(), i as u32 / BLOCK_SIZE)
-            });
-            let entry = get_buffer_block(bn, self.dev.clone())
-                .read()
-                .unwrap()
-                .read(i as usize % BLOCK_SIZE as usize, |entry: &DirEntry| *entry);
-            if entry.inum == 0 {
-                continue;
-            }
-            entries.push(entry);
-        }
-        
         // print header
+        let mut entry = [0u8; std::mem::size_of::<DirEntry>()];
+        while fileread(&fd, &mut entry) > 0 {
+            entries.push(unsafe { std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(entry) });
+        }
         println!("{:<8} {:<8} {:<8} {:<8}", "name", "type", "size", "nlink");
 
         // file open and fstat
@@ -177,6 +181,7 @@ impl Shell {
                 stat.nlink
             );
         }
+        fileclose(fd);
     }
 
     fn cat(&self, path: PathBuf) {
@@ -216,9 +221,56 @@ impl Shell {
         }
     }
 
-    // fn mkdir(&mut self, path: PathBuf) {
-    //     let _ = fcreat(self.dev.clone(), &path, crate::fs::fs::FileType::Dir);
-    // }
+    fn mkdir(&mut self, path: PathBuf) {
+        let _ = fs::file::mkdir(self.dev.clone(), &path);
+    }
+
+    fn touch(&mut self, path: PathBuf) {
+        fs::file::fileopen(self.dev.clone(), &path, OpenMode::OCreate).unwrap();
+    }
+
+    fn rm(&mut self, path: PathBuf) {
+        fs::file::fileunlink(self.dev.clone(), &path).unwrap();
+    }
+
+    fn rmdir(&mut self, path: PathBuf) {
+        // unlink all files in dir
+        let fd = fileopen(self.dev.clone(), &path, OpenMode::ORdonly).unwrap();
+        let ip = unsafe { (*fd.0.as_ptr()).ip.as_ref().unwrap() };
+        for i in (0..ip.read_disk_inode(|diskinode| diskinode.size))
+            .step_by(std::mem::size_of::<DirEntry>())
+        {
+            let bn = ip.modify_disk_inode(|diskinode| {
+                block_map(diskinode, self.dev.clone(), i as u32 / BLOCK_SIZE)
+            });
+            let entry = get_buffer_block(bn, self.dev.clone())
+                .read()
+                .unwrap()
+                .read(i as usize % BLOCK_SIZE as usize, |entry: &DirEntry| *entry);
+            if entry.inum == 0 {
+                continue;
+            }
+            let name = std::str::from_utf8(entry.name.as_slice()).unwrap().trim_matches(char::from(0));
+            // handle . and ..
+            let fpath = match name {
+                "." => self.cwd.clone(),
+                ".." => {
+                    // handle "/"
+                    if self.cwd.to_str().unwrap() == "/" {
+                        PathBuf::from("/".to_string())
+                    } else {
+                        PathBuf::from(self.cwd.clone()).parent().unwrap().to_path_buf()
+                    }
+                }
+                _ => PathBuf::from(self.cwd.clone()).join(name),
+            };
+            // unlink
+            fs::file::fileunlink(self.dev.clone(), &fpath).unwrap();
+        }
+        // unlink dir
+        fs::file::fileunlink(self.dev.clone(), &path).unwrap();
+    }
+
 }
 
 fn main() {

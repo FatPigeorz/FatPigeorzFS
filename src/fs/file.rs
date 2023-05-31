@@ -45,10 +45,10 @@ impl FileTable {
     }
 }
 
-pub static mut FTable: Lazy<FileTable> = Lazy::new(|| FileTable::new());
+pub static mut FTABLE: Lazy<FileTable> = Lazy::new(|| FileTable::new());
 
 fn lock_table() -> MutexGuard<'static, Vec<OpenFile>> {
-    unsafe { FTable.0.lock().unwrap() }
+    unsafe { FTABLE.0.lock().unwrap() }
 }
 
 pub struct Stat {
@@ -77,7 +77,7 @@ pub fn filealloc() -> Option<OpenFile> {
 pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Result<OpenFile, String> {
     // if exists in table
     {
-        let ft = unsafe { FTable.0.lock().unwrap() };
+        let ft = unsafe { FTABLE.0.lock().unwrap() };
         if let Some(f) = ft.iter().find(|f| f.0.borrow().path == *path) {
             return Ok(f.clone());
         }
@@ -105,6 +105,12 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
         )  {
             log_end();
             return Err("file is a directory".to_string());
+        } 
+        if omod == OpenMode::OTrunc {
+            ip.as_ref().unwrap().modify_disk_inode(|diskinode| {
+                diskinode.size = 0;
+                Inode::truncate(dev.clone(), diskinode);
+            });
         }
     }
     log_end();
@@ -124,7 +130,14 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
         (*file_ptr).ip = ip;
         (*file_ptr).dev = Some(dev);
     }
+
     Ok(file)
+}
+
+pub fn mkdir(dev: Arc<dyn BlockDevice>, path: &PathBuf) {
+    log_begin();
+    inode::create(dev.clone(), path, FileType::Dir);
+    log_end();
 }
 
 // the owner ship should move to here directly
@@ -148,7 +161,8 @@ pub fn fileclose(file: OpenFile) {
 pub fn filestat(file: &OpenFile) -> Stat {
     let file = file.0.borrow();
     let ip = file.ip.as_ref().unwrap();
-    ip.read_disk_inode(|diskinode| Stat {
+    log_begin();
+    let ret = ip.read_disk_inode(|diskinode| Stat {
         dev: 0,
         ino: ip.0.inum,
         ty: match diskinode.ftype {
@@ -159,40 +173,53 @@ pub fn filestat(file: &OpenFile) -> Stat {
         },
         nlink: diskinode.nlink as u32,
         size: diskinode.size,
-    })
+    });
+    log_end();
+    ret
 }
 
 pub fn fileread(file: &OpenFile, dst: &mut [u8]) -> usize {
     let mut file_ptr = file.0.as_ptr();
+    log_begin();
     let n = rinode(
         unsafe {(*file_ptr).ip.as_mut().unwrap()},
         dst,
         unsafe {(*file_ptr).offset} as usize,
         dst.len(),
     );
+    log_end();
     unsafe {(*file_ptr).offset += n as u32};
     n
 }
 
 pub fn filewrite(file: &OpenFile, src: &[u8]) -> usize {
     let mut file_ptr = file.0.as_ptr();
+    log_begin();
     let n = winode(
         unsafe {(*file_ptr).ip.as_mut().unwrap()},
         src,
         unsafe {(*file_ptr).offset} as usize,
         src.len(),
     );
+    log_end();
     unsafe {(*file_ptr).offset += n as u32};
     n
 }
 
 pub fn fileunlink(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Result<(), String> {
-    let mut dp = find_parent_inode(dev.clone(), path);
+    log_begin();
+    let dp = find_parent_inode(dev.clone(), path);
     if dp.is_none() {
         return Err("fileunlink: cannot find parent inode".to_string());
     }
     let mut dp = dp.unwrap();
-    let mut name = path.file_name().unwrap().to_str().unwrap(); 
-    dirunlink(dev, &mut dp, name)?;
+    let name = path.file_name().unwrap().to_str().unwrap(); 
+    dirunlink(&mut dp, name)?;
+    dp.modify_disk_inode(
+        |diskinode| {
+            diskinode.nlink -= 1;
+        }
+    );
+    log_end();
     Ok(())
 }

@@ -27,7 +27,6 @@ use super::inode::DiskInode;
 pub const IPB: u32 = BLOCK_SIZE / (std::mem::size_of::<DiskInode>() as u32);
 
 pub const NFILE: u32 = 100;
-pub const NOFILE: u32 = 16;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum FileType {
