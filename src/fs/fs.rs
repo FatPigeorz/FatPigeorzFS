@@ -46,7 +46,6 @@ impl std::fmt::Display for FileType {
     }
 }
 
-
 impl Default for FileType {
     fn default() -> Self {
         FileType::Free

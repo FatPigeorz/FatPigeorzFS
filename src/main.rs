@@ -2,13 +2,13 @@ mod fs;
 mod mkfs;
 
 use clap::{Parser, Subcommand};
-use env_logger::{Builder};
+use env_logger::Builder;
 use fs::{
-    buffer::{get_buffer_block, sync_all},
-    file::{fileopen, fileread, filewrite, OpenFile, OpenMode},
+    buffer::{sync_all},
+    file::{fileopen, fileread, filewrite, OpenFile, OpenMode, fileseek},
     filedisk::FileDisk,
-    fs::{BlockDevice, BLOCK_SIZE},
-    inode::{block_map, DirEntry},
+    fs::BlockDevice,
+    inode::DirEntry,
     log::LOG_MANAGER,
     superblock::SB,
 };
@@ -19,7 +19,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::fs::{file::{filestat, fileclose}, fs::FileType};
+use crate::fs::{
+    file::{fileclose, filestat},
+    fs::FileType,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "FatPigeorzFS")]
@@ -39,7 +42,7 @@ enum Commands {
         #[arg(long, short, value_name = "IMAGE_PATH", default_value = "./myDisk.img")]
         path: PathBuf,
         // image size
-        #[arg(long, short)]
+        #[arg(long, short, value_name = "IMAGE_SIZE", default_value = "2097152")]
         size: u32,
     },
     Shell {
@@ -112,8 +115,13 @@ impl Shell {
             // flush immediately
             print!("{} $ ", self.cwd.to_str().unwrap());
             std::io::stdout().flush().unwrap();
-            let input = String::new();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap();
             let mut args = input.split_whitespace();
+            // just enter
+            if args.clone().count() == 0 {
+                continue;
+            }
             let cmd = args.next().unwrap();
             // print prompt
             match cmd {
@@ -128,33 +136,62 @@ impl Shell {
                     self.ls(PathBuf::from(path));
                 }
                 "cat" => {
-                    let path = args.next().unwrap();
+                    let arg = args.next().unwrap();
+                    let path = if arg.starts_with("/") {
+                        PathBuf::from(arg)
+                    } else {
+                        canonicalize(PathBuf::from(self.cwd.clone()).join(arg))
+                    };
                     self.cat(PathBuf::from(path));
                 }
                 "cd" => {
-                    let path = args.next().unwrap();
+                    let arg = args.next().unwrap();
+                    let path = if arg.starts_with("/") {
+                        PathBuf::from(arg)
+                    } else {
+                        canonicalize(PathBuf::from(self.cwd.clone()).join(arg))
+                    };
                     self.cd(PathBuf::from(path));
                 }
                 "write" => {
                     let from = args.next().unwrap();
-                    let to = args.next().unwrap();
+                    let arg = args.next().unwrap();
+                    let to = if arg.starts_with("/") {
+                        PathBuf::from(arg)
+                    } else {
+                        canonicalize(PathBuf::from(self.cwd.clone()).join(arg))
+                    };
                     self.write(PathBuf::from(from), PathBuf::from(to));
                 }
                 "mkdir" => {
-                    let path = args.next().unwrap();
+                    let arg = args.next().unwrap();
+                    let path = if arg.starts_with("/") {
+                        PathBuf::from(arg)
+                    } else {
+                        canonicalize(PathBuf::from(self.cwd.clone()).join(arg))
+                    };
                     self.mkdir(PathBuf::from(path));
                 }
                 "touch" => {
-                    let path = args.next().unwrap();
+                    let arg = args.next().unwrap();
+                    let path = if arg.starts_with("/") {
+                        PathBuf::from(arg)
+                    } else {
+                        canonicalize(PathBuf::from(self.cwd.clone()).join(arg))
+                    };
                     self.touch(PathBuf::from(path));
                 }
                 "rm" => {
-                    let path = args.next().unwrap();
+                    let arg = args.next().unwrap();
+                    let path = if arg.starts_with("/") {
+                        PathBuf::from(arg)
+                    } else {
+                        canonicalize(PathBuf::from(self.cwd.clone()).join(arg))
+                    };
                     self.rm(PathBuf::from(path));
                 }
-                "rmdir" => {
-                    let path = args.next().unwrap();
-                    self.rmdir(PathBuf::from(path));
+                "test" => {
+                    self.test();
                 }
                 _ => {
                     println!("command not found: {}", cmd);
@@ -170,13 +207,23 @@ impl Shell {
         // print header
         let mut entry = [0u8; std::mem::size_of::<DirEntry>()];
         while fileread(&fd, &mut entry) > 0 {
-            entries.push(unsafe { std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(entry) });
+            entries.push(unsafe {
+                std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(entry)
+            });
         }
-        println!("{:<12} {:<12} {:<12} {:<12}", "name", "type", "size", "nlink");
+        println!(
+            "{:<12} {:<12} {:<12} {:<12}",
+            "name", "type", "size", "nlink"
+        );
 
         // file open and fstat
         for entry in entries {
-            let name = std::str::from_utf8(entry.name.as_slice()).unwrap().trim_matches(char::from(0));
+            if entry.inum == 0 {
+                continue;
+            }
+            let name = std::str::from_utf8(entry.name.as_slice())
+                .unwrap()
+                .trim_matches(char::from(0));
             // canonicalize the path
             let fpath = canonicalize(PathBuf::from(path.clone()).join(name));
             let mut file = fileopen(self.dev.clone(), &fpath, OpenMode::ORdonly).unwrap();
@@ -260,47 +307,22 @@ impl Shell {
     }
 
     fn rm(&mut self, path: PathBuf) {
+        // check not dir 
         fs::file::fileunlink(self.dev.clone(), &path).unwrap();
     }
 
-    fn rmdir(&mut self, path: PathBuf) {
-        // unlink all files in dir
-        let fd = fileopen(self.dev.clone(), &path, OpenMode::ORdonly).unwrap();
-        let ip = unsafe { (*fd.0.as_ptr()).ip.as_ref().unwrap() };
-        for i in (0..ip.read_disk_inode(|diskinode| diskinode.size))
-            .step_by(std::mem::size_of::<DirEntry>())
-        {
-            let bn = ip.modify_disk_inode(|diskinode| {
-                block_map(diskinode, self.dev.clone(), i as u32 / BLOCK_SIZE)
-            });
-            let entry = get_buffer_block(bn, self.dev.clone())
-                .read()
-                .unwrap()
-                .read(i as usize % BLOCK_SIZE as usize, |entry: &DirEntry| *entry);
-            if entry.inum == 0 {
-                continue;
-            }
-            let name = std::str::from_utf8(entry.name.as_slice()).unwrap().trim_matches(char::from(0));
-            // handle . and ..
-            let fpath = match name {
-                "." => self.cwd.clone(),
-                ".." => {
-                    // handle "/"
-                    if self.cwd.to_str().unwrap() == "/" {
-                        PathBuf::from("/".to_string())
-                    } else {
-                        PathBuf::from(self.cwd.clone()).parent().unwrap().to_path_buf()
-                    }
-                }
-                _ => PathBuf::from(self.cwd.clone()).join(name),
-            };
-            // unlink
-            fs::file::fileunlink(self.dev.clone(), &fpath).unwrap();
-        }
-        // unlink dir
-        fs::file::fileunlink(self.dev.clone(), &path).unwrap();
+    fn test(&mut self) {
+        self.mkdir("/test".to_string().into());
+        self.touch("/test/jerry".to_string().into());
+        let mut file = fileopen(self.dev.clone(), &"/test/jerry".to_string().into(), OpenMode::OWronly).unwrap();
+        // 800 random bytes
+        let mut buf = [0; 800].map(|_| rand::random::<u8>());
+        filewrite(&mut file, &buf);
+        fileseek(&mut file, 500, 0).unwrap();
+        let n = fileread(&mut file, &mut buf);
+        filewrite(&mut file, &buf[0..n]);
+        self.ls("/test".to_string().into());
     }
-
 }
 
 fn main() {
@@ -365,6 +387,8 @@ mod test {
         shell.mkdir(std::path::PathBuf::from("/dev"));
         shell.ls(std::path::PathBuf::from("/"));
         println!("");
+        shell.ls(std::path::PathBuf::from("/"));
+        println!("");
         shell.ls(std::path::PathBuf::from("/home/"));
         println!("");
         shell.touch(std::path::PathBuf::from("/home/texts/text1"));
@@ -373,10 +397,20 @@ mod test {
         println!("");
         // write bigphoto to
         shell.touch(std::path::PathBuf::from("/home/photos/nishino.jpg"));
-        shell.write( 
+        shell.write(
             std::path::PathBuf::from("./nishino.jpg"),
             std::path::PathBuf::from("/home/photos/nishino.jpg"),
         );
         shell.ls(std::path::PathBuf::from("/home/photos"));
+        println!("");
+        shell.rm(std::path::PathBuf::from("/home/photos/nishino.jpg"));
+        shell.ls(std::path::PathBuf::from("/home/photos"));
+        println!("");
+    }
+
+    #[test]
+    fn test_test() {
+        let mut shell = super::Shell::new(std::path::PathBuf::from("./test.img"));
+        shell.test();
     }
 }

@@ -3,7 +3,7 @@
 /.vscode
 
 *.img
+*.jpg
 Cargo.lock
 mkfs.log
-bigfile.jpg
 ReadMe.txt

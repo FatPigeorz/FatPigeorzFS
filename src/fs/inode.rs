@@ -434,6 +434,7 @@ pub fn dirunlink(dp: &mut InodePtr, name: &str) -> Result<(), String> {
     nameassign(&mut de.name, &"".to_string());
     let src = unsafe { std::mem::transmute::<DirEntry, [u8; std::mem::size_of::<DirEntry>()]>(de) };
     winode(dp, &src, offset, src.len());
+    // decrease dp's size
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 use std::{
+    cell::RefCell,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard}, cell::RefCell,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use once_cell::sync::Lazy;
@@ -9,12 +10,13 @@ use crate::fs::log::{log_begin, log_end};
 
 use super::{
     fs::{BlockDevice, FileType, NFILE},
-    inode::{*, self},
+    inode::{self, *},
 };
 
 #[derive(Default, Copy, Clone, PartialEq)]
 pub enum FDType {
-    #[default] Free = 0,
+    #[default]
+    Free = 0,
     INODE = 1,
     // Device
     // PIPE
@@ -41,7 +43,9 @@ pub struct FileTable(Mutex<Vec<OpenFile>>);
 impl FileTable {
     fn new() -> Self {
         // create a NFILE length vector
-        Self(Mutex::new((0..NFILE).map(|_| OpenFile::default()).collect::<Vec<_>>()))
+        Self(Mutex::new(
+            (0..NFILE).map(|_| OpenFile::default()).collect::<Vec<_>>(),
+        ))
     }
 }
 
@@ -74,7 +78,11 @@ pub fn filealloc() -> Option<OpenFile> {
 }
 
 /// path should be absolute path
-pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Result<OpenFile, String> {
+pub fn fileopen(
+    dev: Arc<dyn BlockDevice>,
+    path: &PathBuf,
+    omod: OpenMode,
+) -> Result<OpenFile, String> {
     // if exists in table
     {
         let ft = unsafe { FTABLE.0.lock().unwrap() };
@@ -82,6 +90,9 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
             if omod == OpenMode::OCreate {
                 return Err("file exists".to_string());
             } else {
+                unsafe {
+                    (*f.0.as_ptr()).offset = 0;
+                }
                 return Ok(f.clone());
             }
         }
@@ -103,14 +114,14 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
         }
         ip = Ok(ip_.unwrap());
         // check mode
-        if ip.as_ref().unwrap().read_disk_inode(
-            |diskinode| {
-                omod != OpenMode::ORdonly && diskinode.ftype == 2
-            }
-        )  {
+        if ip
+            .as_ref()
+            .unwrap()
+            .read_disk_inode(|diskinode| omod != OpenMode::ORdonly && diskinode.ftype == 2)
+        {
             log_end();
             return Err("file is a directory".to_string());
-        } 
+        }
         if omod == OpenMode::OTrunc {
             ip.as_ref().unwrap().modify_disk_inode(|diskinode| {
                 diskinode.size = 0;
@@ -119,7 +130,7 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
         }
     }
     log_end();
-    // alloc file 
+    // alloc file
     let file = filealloc();
     if file.is_none() {
         return Err("no free file in table".to_string());
@@ -160,10 +171,12 @@ pub fn fileclose(file: OpenFile) {
     // clear attribute
     // ty = FileType::Free;
     let file_ptr = file.0.as_ptr();
-    unsafe {(*file_ptr).ty = FDType::Free};
+    unsafe { (*file_ptr).ty = FDType::Free };
     log_begin();
     // the drop of inode will free the inode and put it into inode table
-    unsafe {(*file_ptr).ip = None};
+    unsafe { (*file_ptr).ip = None };
+    unsafe { (*file_ptr).dev = None };
+    unsafe { (*file_ptr).offset = 0 };
     log_end();
 }
 
@@ -191,13 +204,13 @@ pub fn fileread(file: &OpenFile, dst: &mut [u8]) -> usize {
     let mut file_ptr = file.0.as_ptr();
     log_begin();
     let n = rinode(
-        unsafe {(*file_ptr).ip.as_mut().unwrap()},
+        unsafe { (*file_ptr).ip.as_mut().unwrap() },
         dst,
-        unsafe {(*file_ptr).offset} as usize,
+        unsafe { (*file_ptr).offset } as usize,
         dst.len(),
     );
     log_end();
-    unsafe {(*file_ptr).offset += n as u32};
+    unsafe { (*file_ptr).offset += n as u32 };
     n
 }
 
@@ -205,14 +218,40 @@ pub fn filewrite(file: &OpenFile, src: &[u8]) -> usize {
     let mut file_ptr = file.0.as_ptr();
     log_begin();
     let n = winode(
-        unsafe {(*file_ptr).ip.as_mut().unwrap()},
+        unsafe { (*file_ptr).ip.as_mut().unwrap() },
         src,
-        unsafe {(*file_ptr).offset} as usize,
+        unsafe { (*file_ptr).offset } as usize,
         src.len(),
     );
     log_end();
-    unsafe {(*file_ptr).offset += n as u32};
+    unsafe { (*file_ptr).offset += n as u32 };
     n
+}
+
+pub fn fileseek(file: &mut OpenFile, offset: usize, whence: usize) -> Result<(), String> {
+    let mut file_ptr = file.0.as_ptr();
+    match whence {
+        0 => {
+            unsafe { (*file_ptr).offset = offset as u32 };
+        }
+        1 => {
+            unsafe { (*file_ptr).offset += offset as u32 };
+        }
+        2 => {
+            unsafe {
+                (*file_ptr).offset = (*file_ptr)
+                    .ip
+                    .as_ref()
+                    .unwrap()
+                    .read_disk_inode(|diskinode| diskinode.size)
+                    - offset as u32
+            };
+        }
+        _ => {
+            return Err("filelseek: invalid whence".to_string());
+        }
+    }
+    Ok(())
 }
 
 pub fn fileunlink(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Result<(), String> {
@@ -222,13 +261,21 @@ pub fn fileunlink(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Result<(), Strin
         return Err("fileunlink: cannot find parent inode".to_string());
     }
     let mut dp = dp.unwrap();
-    let name = path.file_name().unwrap().to_str().unwrap(); 
+    let ip = find_inode(dev, path);
+    if ip.is_none() {
+        return Err("fileunlink: cannot find inode".to_string());
+    }
+    let ty = ip
+        .as_ref()
+        .unwrap()
+        .read_disk_inode(|diskinode| diskinode.ftype);
+    let name = path.file_name().unwrap().to_str().unwrap();
     dirunlink(&mut dp, name)?;
-    dp.modify_disk_inode(
-        |diskinode| {
+    if ty == FileType::Dir as u16 {
+        dp.modify_disk_inode(|diskinode| {
             diskinode.nlink -= 1;
-        }
-    );
+        });
+    };
     log_end();
     Ok(())
 }
