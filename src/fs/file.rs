@@ -79,7 +79,11 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
     {
         let ft = unsafe { FTABLE.0.lock().unwrap() };
         if let Some(f) = ft.iter().find(|f| f.0.borrow().path == *path) {
-            return Ok(f.clone());
+            if omod == OpenMode::OCreate {
+                return Err("file exists".to_string());
+            } else {
+                return Ok(f.clone());
+            }
         }
     }
     // find inode
@@ -87,16 +91,17 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
     log_begin();
     if omod == OpenMode::OCreate {
         ip = inode::create(dev.clone(), &path, FileType::File);
-        if ip.is_none() {
+        if ip.is_err() {
             log_end();
             return Err("file exists".to_string());
         }
     } else {
-        ip = inode::find_inode(dev.clone(), &path);
-        if ip.is_none() {
+        let ip_ = inode::find_inode(dev.clone(), &path);
+        if ip_.is_none() {
             log_end();
             return Err("file not found".to_string());
         }
+        ip = Ok(ip_.unwrap());
         // check mode
         if ip.as_ref().unwrap().read_disk_inode(
             |diskinode| {
@@ -127,17 +132,21 @@ pub fn fileopen(dev: Arc<dyn BlockDevice>, path: &PathBuf, omod: OpenMode) -> Re
         (*file_ptr).writable = omod == OpenMode::OWronly || omod == OpenMode::ORdwr;
         (*file_ptr).offset = 0;
         (*file_ptr).path = path.clone();
-        (*file_ptr).ip = ip;
+        (*file_ptr).ip = Some(ip.unwrap());
         (*file_ptr).dev = Some(dev);
     }
 
     Ok(file)
 }
 
-pub fn mkdir(dev: Arc<dyn BlockDevice>, path: &PathBuf) {
+pub fn mkdir(dev: Arc<dyn BlockDevice>, path: &PathBuf) -> Result<(), String> {
     log_begin();
-    inode::create(dev.clone(), path, FileType::Dir);
+    let ret = inode::create(dev.clone(), path, FileType::Dir);
     log_end();
+    match ret {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 // the owner ship should move to here directly

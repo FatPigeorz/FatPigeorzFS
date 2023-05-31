@@ -56,6 +56,30 @@ struct Shell {
     pub cwd: PathBuf,
 }
 
+fn canonicalize(path: PathBuf) -> PathBuf {
+    // eliminate the . and .. in the path
+    let mut stack = Vec::new();
+    // root
+    stack.push(std::path::Component::RootDir);
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => stack.push(component),
+            std::path::Component::ParentDir => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    // if empty, is the root
+    if stack.is_empty() {
+        stack.push(std::path::Component::RootDir);
+    }
+    stack.iter().fold(PathBuf::new(), |mut acc, x| {
+        acc.push(x);
+        acc
+    })
+}
+
 impl Shell {
     pub fn new(image_path: PathBuf) -> Self {
         Builder::new()
@@ -148,29 +172,18 @@ impl Shell {
         while fileread(&fd, &mut entry) > 0 {
             entries.push(unsafe { std::mem::transmute::<[u8; std::mem::size_of::<DirEntry>()], DirEntry>(entry) });
         }
-        println!("{:<8} {:<8} {:<8} {:<8}", "name", "type", "size", "nlink");
+        println!("{:<12} {:<12} {:<12} {:<12}", "name", "type", "size", "nlink");
 
         // file open and fstat
         for entry in entries {
             let name = std::str::from_utf8(entry.name.as_slice()).unwrap().trim_matches(char::from(0));
-            // handle . and ..
-            let fpath = match name {
-                "." => self.cwd.clone(),
-                ".." => {
-                    // handle "/"
-                    if self.cwd.to_str().unwrap() == "/" {
-                        PathBuf::from("/".to_string())
-                    } else {
-                        PathBuf::from(self.cwd.clone()).parent().unwrap().to_path_buf()
-                    }
-                }
-                _ => PathBuf::from(self.cwd.clone()).join(name),
-            };
+            // canonicalize the path
+            let fpath = canonicalize(PathBuf::from(path.clone()).join(name));
             let mut file = fileopen(self.dev.clone(), &fpath, OpenMode::ORdonly).unwrap();
             let stat = filestat(&mut file);
             // print
             println!(
-                "{:<8} {:<8} {:<8} {:<8}",
+                "{:<12} {:<12} {:<12} {:<12}",
                 name,
                 match stat.ty {
                     FileType::Free => "free",
@@ -188,8 +201,10 @@ impl Shell {
         let mut fd = fileopen(self.dev.clone(), &path, OpenMode::ORdonly).unwrap();
         let mut dst = vec![0; 1024];
         while fileread(&mut fd, &mut dst) > 0 {
-            println!("{}", String::from_utf8(dst.clone()).unwrap());
+            print!("{}", String::from_utf8(dst.clone()).unwrap());
+            dst.fill(0);
         }
+        fileclose(fd);
     }
 
     fn cd(&mut self, path: PathBuf) {
@@ -216,17 +231,32 @@ impl Shell {
         let mut from = std::fs::File::open(from).unwrap();
         let mut dst = vec![0; 1024];
         let mut to = fileopen(self.dev.clone(), &to, OpenMode::OWronly).unwrap();
-        while from.read(&mut dst).unwrap() > 0 {
-            filewrite(&mut to, &dst);
+        loop {
+            let n = from.read(&mut dst).unwrap();
+            filewrite(&mut to, &dst[0..n]);
+            if n < 1024 {
+                break;
+            }
         }
+        fileclose(to);
     }
 
     fn mkdir(&mut self, path: PathBuf) {
-        let _ = fs::file::mkdir(self.dev.clone(), &path);
+        match fs::file::mkdir(self.dev.clone(), &path) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("mkdir: {}", e);
+            }
+        }
     }
 
     fn touch(&mut self, path: PathBuf) {
-        fs::file::fileopen(self.dev.clone(), &path, OpenMode::OCreate).unwrap();
+        match fs::file::fileopen(self.dev.clone(), &path, OpenMode::OCreate) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("touch: {}", e);
+            }
+        }
     }
 
     fn rm(&mut self, path: PathBuf) {
@@ -292,6 +322,18 @@ fn main() {
 
 #[cfg(test)]
 mod test {
+    use crate::canonicalize;
+
+    #[test]
+    fn test_canonicalize() {
+        let path = std::path::PathBuf::from("/usr/bin/../bin/./ls");
+        assert_eq!(
+            canonicalize(path.clone()),
+            std::path::PathBuf::from("/usr/bin/ls")
+        );
+        println!("{:?}", canonicalize(path));
+    }
+
     #[test]
     fn test_ls() {
         let shell = super::Shell::new(std::path::PathBuf::from("./test.img"));
@@ -302,5 +344,39 @@ mod test {
     fn test_cat() {
         let shell = super::Shell::new(std::path::PathBuf::from("./test.img"));
         shell.cat(std::path::PathBuf::from("/test"));
+    }
+
+    #[test]
+    fn test_touch() {
+        let mut shell = super::Shell::new(std::path::PathBuf::from("./test.img"));
+        shell.touch(std::path::PathBuf::from("/test"));
+        shell.ls(std::path::PathBuf::from("/"));
+    }
+
+    #[test]
+    fn test_mkdirs() {
+        let mut shell = super::Shell::new(std::path::PathBuf::from("./test.img"));
+        shell.mkdir(std::path::PathBuf::from("/bin"));
+        shell.mkdir(std::path::PathBuf::from("/etc"));
+        shell.mkdir(std::path::PathBuf::from("/home"));
+        shell.mkdir(std::path::PathBuf::from("/home/texts"));
+        shell.mkdir(std::path::PathBuf::from("/home/reports"));
+        shell.mkdir(std::path::PathBuf::from("/home/photos"));
+        shell.mkdir(std::path::PathBuf::from("/dev"));
+        shell.ls(std::path::PathBuf::from("/"));
+        println!("");
+        shell.ls(std::path::PathBuf::from("/home/"));
+        println!("");
+        shell.touch(std::path::PathBuf::from("/home/texts/text1"));
+        println!("");
+        shell.ls(std::path::PathBuf::from("/home/texts"));
+        println!("");
+        // write bigphoto to
+        shell.touch(std::path::PathBuf::from("/home/photos/nishino.jpg"));
+        shell.write( 
+            std::path::PathBuf::from("./nishino.jpg"),
+            std::path::PathBuf::from("/home/photos/nishino.jpg"),
+        );
+        shell.ls(std::path::PathBuf::from("/home/photos"));
     }
 }

@@ -437,8 +437,11 @@ pub fn dirunlink(dp: &mut InodePtr, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> Option<InodePtr> {
+pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> Result<InodePtr, String> {
     let parent_dir = find_parent_inode(dev.clone(), path);
+    if parent_dir.is_none() {
+        return Err("create: no parent dir".to_string());
+    }
     let mut dp = parent_dir.unwrap();
     let dp_dinode = dp.0.read_disk_inode(|diskinode| *diskinode);
     // alloc
@@ -450,7 +453,7 @@ pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> 
     );
     if let Some(inode) = ip {
         if inode.0.read_disk_inode(|diskinode| diskinode.ftype) == filetype as u16 {
-            return Some(inode);
+            return Err("create: file exists".to_string());
         }
     }
     if let Some(mut ip) = inode_alloc(dev.clone(), filetype) {
@@ -473,9 +476,9 @@ pub fn create(dev: Arc<dyn BlockDevice>, path: &PathBuf, filetype: FileType) -> 
             // update parent dir size
             dp.modify_disk_inode(|diskinode| diskinode.nlink += 1);
         }
-        Some(ip)
+        Ok(ip)
     } else {
-        None
+        Err("no free inode".to_string())
     }
 }
 
@@ -733,11 +736,11 @@ mod test {
         super::rinode(&mut testi, &mut buf, 0, 6);
         assert_eq!(buf, [1, 2, 3, 4, 5, 6]);
         // test big file
-        let mut buf = [1; 512 * 13];
-        winode(&mut testi, &mut buf, 0, 512 * 13);
-        let mut buf = [0; 512 * 13];
-        super::rinode(&mut testi, &mut buf, 0, 512 * 13);
-        assert_eq!(buf, [1; 512 * 13]);
+        let mut buf = ['1' as u8;512 * 13 + 1];
+        winode(&mut testi, &mut buf, 0, 512 * 13 + 1);
+        let mut buf = [0; 512 * 13 + 1];
+        super::rinode(&mut testi, &mut buf, 0, 512 * 13 + 1);
+        assert_eq!(buf, ['1' as u8; 512 * 13 + 1]);
         log_end();
         sync_all();
     }
