@@ -29,12 +29,24 @@ pub const IPB: u32 = BLOCK_SIZE / (std::mem::size_of::<DiskInode>() as u32);
 pub const NFILE: u32 = 100;
 pub const NOFILE: u32 = 16;
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum FileType {
     Free = 0,
     File = 1,
     Dir = 2,
 }
+
+// Display
+impl std::fmt::Display for FileType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            FileType::Free => write!(f, "Free"),
+            FileType::File => write!(f, "File"),
+            FileType::Dir => write!(f, "Dir"),
+        }
+    }
+}
+
 
 impl Default for FileType {
     fn default() -> Self {
